@@ -1,0 +1,19 @@
+# DMZ WebUI 入口（监听 8443）
+# 其他服务请通过 nftables 端口转发访问
+# 部署前请将 <YOUR_DOMAIN>、<DMZ_WEBUI_HOST> 和证书路径替换为实际值
+
+<YOUR_DOMAIN>:8443 {
+    encode gzip
+    tls /etc/letsencrypt/live/<YOUR_DOMAIN>/fullchain.pem /etc/letsencrypt/live/<YOUR_DOMAIN>/privkey.pem
+
+    route /admin* {
+        uri strip_prefix /admin
+        reverse_proxy <DMZ_WEBUI_HOST>:5000
+    }
+
+    route /assets* {
+        reverse_proxy <DMZ_WEBUI_HOST>:5000
+    }
+
+    redir / /admin 302
+}

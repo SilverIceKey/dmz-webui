@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+backend/.venv/
+backend/venv/
+env/
+ENV/
+.env
+.venv
+
+# Node
+frontend/node_modules/
+frontend/dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build outputs
+backend/static/
+!backend/static/.gitkeep
+
+# Logs
+*.log
+/var/log/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Deployment artifacts
+*.backup.*
+*.rollback.*
+
+# Certificates and keys
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
