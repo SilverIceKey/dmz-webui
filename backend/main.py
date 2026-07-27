@@ -199,9 +199,7 @@ def _load_ssl_proxy_rules() -> List[dict]:
     return []
 
 def _save_ssl_proxy_rules(rules: List[dict]):
-    os.makedirs(os.path.dirname(SSL_PROXY_RULES_PATH), exist_ok=True)
-    with open(SSL_PROXY_RULES_PATH, "w") as f:
-        json.dump(rules, f, indent=2)
+    _atomic_write_text(SSL_PROXY_RULES_PATH, json.dumps(rules, indent=2))
 
 def _next_ssl_proxy_id(rules: List[dict]) -> int:
     if not rules:
@@ -252,34 +250,45 @@ def _read_nftables() -> str:
             return f.read()
     return ""
 
-def _commit_nftables(content: str):
-    """Apply project-owned tables, then atomically persist the validated config."""
-    old_content = _read_nftables()
-    config_dir = os.path.dirname(NFTABLES_CONF)
-    os.makedirs(config_dir, exist_ok=True)
-    fd, temp_path = tempfile.mkstemp(prefix=".nftables.", dir=config_dir, text=True)
-    applied = False
+
+def _atomic_write_text(path: str, content: str):
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", dir=directory, text=True)
     try:
-        if os.path.exists(NFTABLES_CONF):
-            os.fchmod(fd, stat.S_IMODE(os.stat(NFTABLES_CONF).st_mode))
+        if os.path.exists(path):
+            os.fchmod(fd, stat.S_IMODE(os.stat(path).st_mode))
         with os.fdopen(fd, "w") as temp_file:
             temp_file.write(content)
             temp_file.flush()
             os.fsync(temp_file.fileno())
-
-        apply_owned_rules(content)
-        applied = True
-        os.replace(temp_path, NFTABLES_CONF)
+        os.replace(temp_path, path)
     except Exception:
-        if applied and old_content:
-            try:
-                apply_owned_rules(old_content)
-            except Exception as rollback_error:
-                print(f"[dmz-webui] nftables runtime rollback failed: {rollback_error}")
+        try:
+            os.close(fd)
+        except OSError:
+            pass
         try:
             os.unlink(temp_path)
         except FileNotFoundError:
             pass
+        raise
+
+
+def _commit_nftables(content: str):
+    """Apply project-owned tables, then atomically persist the validated config."""
+    old_content = _read_nftables()
+    applied = False
+    try:
+        apply_owned_rules(content, previous_config_text=old_content)
+        applied = True
+        _atomic_write_text(NFTABLES_CONF, content)
+    except Exception:
+        if applied and old_content:
+            try:
+                apply_owned_rules(old_content, previous_config_text=content)
+            except Exception as rollback_error:
+                print(f"[dmz-webui] nftables runtime rollback failed: {rollback_error}")
         raise
 
 def _build_whitelist_prefix(whitelist_type: str, whitelist_ips: str) -> str:
@@ -407,18 +416,7 @@ def _insert_into_chain(text: str, chain_name: str, new_lines: List[str]) -> str:
         return text
     return text[:close_idx] + "\n" + "\n".join(new_lines) + text[close_idx:]
 
-def _apply_ssl_proxy_rules():
-    """根据 ssl_proxy_rules.json 重写 Caddyfile 和 nftables 中相关规则。"""
-    rules = _load_ssl_proxy_rules()
-
-    # Regenerate Caddyfile (includes SSL proxy sites)
-    _regenerate_caddyfile()
-    try:
-        _reload_caddy()
-    except Exception as e:
-        print(f"[dmz-webui] Caddy reload failed during SSL proxy apply: {e}")
-
-    # Regenerate nftables input / prerouting rules
+def _build_ssl_proxy_nftables(rules: List[dict]) -> str:
     text = _read_nftables()
     text = _remove_ssl_proxy_nft_rules(text)
 
@@ -426,17 +424,57 @@ def _apply_ssl_proxy_rules():
     prerouting_lines = []
     for rule in rules:
         port = rule["port"]
-        comment = rule.get("comment", "")
         suffix = f"  # ssl-proxy:{port}"
-        input_lines.append(f"        tcp dport {port} accept{suffix}")
-        if not rule.get("ssl_enabled"):
+        if rule.get("ssl_enabled"):
+            input_lines.append(f"        tcp dport {port} accept{suffix}")
+        else:
             prerouting_lines.append(
                 f"        tcp dport {port} dnat to {rule['dest_ip']}:{rule['dest_port']}{suffix}"
             )
 
     text = _insert_into_chain(text, "input", input_lines)
     text = _insert_into_chain(text, "prerouting", prerouting_lines)
-    _commit_nftables(text)
+    return text
+
+
+def _apply_ssl_proxy_rules(rules: List[dict]):
+    """Atomically apply candidate SSL rules or restore every previous state."""
+    old_rules = _load_ssl_proxy_rules()
+    old_caddy = _read_caddy()
+    old_nftables = _read_nftables()
+    new_caddy = _build_caddyfile(rules)
+    new_nftables = _build_ssl_proxy_nftables(rules)
+    _validate_caddy(new_caddy)
+
+    caddy_changed = False
+    nftables_changed = False
+    try:
+        _write_caddy(new_caddy)
+        caddy_changed = True
+        _reload_caddy()
+        _commit_nftables(new_nftables)
+        nftables_changed = True
+        _save_ssl_proxy_rules(rules)
+    except Exception:
+        rollback_errors = []
+        if nftables_changed:
+            try:
+                _commit_nftables(old_nftables)
+            except Exception as rollback_error:
+                rollback_errors.append(f"nftables: {rollback_error}")
+        if caddy_changed:
+            try:
+                _write_caddy(old_caddy)
+                _reload_caddy()
+            except Exception as rollback_error:
+                rollback_errors.append(f"caddy: {rollback_error}")
+        try:
+            _save_ssl_proxy_rules(old_rules)
+        except Exception as rollback_error:
+            rollback_errors.append(f"ssl rules: {rollback_error}")
+        if rollback_errors:
+            print(f"[dmz-webui] SSL proxy rollback errors: {'; '.join(rollback_errors)}")
+        raise
 
 def _check_port_conflict(port: int, exclude_rule_id: Optional[int] = None):
     """检查端口是否和 WebUI、现有 SSL 代理规则或防火墙规则冲突。"""
@@ -586,8 +624,10 @@ def create_ssl_proxy_rule(rule: SslProxyRuleCreate, _: str = Depends(verify_toke
         "comment": rule.comment or "",
     }
     rules.append(new_rule)
-    _save_ssl_proxy_rules(rules)
-    _apply_ssl_proxy_rules()
+    try:
+        _apply_ssl_proxy_rules(rules)
+    except Exception as error:
+        raise HTTPException(status_code=500, detail="SSL proxy apply failed; previous configuration restored") from error
     return {"ok": True, "id": new_rule["id"]}
 
 @app.put("/api/ssl-proxy/rules/{rule_id}")
@@ -605,8 +645,10 @@ def edit_ssl_proxy_rule(rule_id: int, rule: SslProxyRuleCreate, _: str = Depends
         "ssl_enabled": rule.ssl_enabled,
         "comment": rule.comment or "",
     }
-    _save_ssl_proxy_rules(rules)
-    _apply_ssl_proxy_rules()
+    try:
+        _apply_ssl_proxy_rules(rules)
+    except Exception as error:
+        raise HTTPException(status_code=500, detail="SSL proxy apply failed; previous configuration restored") from error
     return {"ok": True}
 
 @app.delete("/api/ssl-proxy/rules/{rule_id}")
@@ -615,8 +657,10 @@ def delete_ssl_proxy_rule(rule_id: int, _: str = Depends(verify_token)):
     new_rules = [r for r in rules if r.get("id") != rule_id]
     if len(new_rules) == len(rules):
         raise HTTPException(status_code=404, detail="Rule not found")
-    _save_ssl_proxy_rules(new_rules)
-    _apply_ssl_proxy_rules()
+    try:
+        _apply_ssl_proxy_rules(new_rules)
+    except Exception as error:
+        raise HTTPException(status_code=500, detail="SSL proxy apply failed; previous configuration restored") from error
     return {"ok": True}
 
 # ----------------- Caddy -----------------
@@ -628,8 +672,7 @@ def _read_caddy() -> str:
     return ""
 
 def _write_caddy(content: str):
-    with open(CADDYFILE, "w") as f:
-        f.write(content)
+    _atomic_write_text(CADDYFILE, content)
 
 def _tls_line(domain: str) -> str:
     cert_dir = f"/etc/letsencrypt/live/{domain}"
@@ -637,7 +680,7 @@ def _tls_line(domain: str) -> str:
         return f"tls {cert_dir}/fullchain.pem {cert_dir}/privkey.pem"
     return "tls internal"
 
-def _regenerate_caddyfile():
+def _build_caddyfile(rules: Optional[List[dict]] = None) -> str:
     settings = load_settings()
     domain = DMZ_DOMAIN
 
@@ -671,7 +714,7 @@ def _regenerate_caddyfile():
     lines.append("")
 
     # SSL proxy sites
-    for rule in _load_ssl_proxy_rules():
+    for rule in rules if rules is not None else _load_ssl_proxy_rules():
         if not rule.get("ssl_enabled"):
             continue
         port = rule["port"]
@@ -685,18 +728,40 @@ def _regenerate_caddyfile():
         lines.append("}")
         lines.append("")
 
-    _write_caddy("\n".join(lines))
+    return "\n".join(lines)
+
+
+def _regenerate_caddyfile():
+    _write_caddy(_build_caddyfile())
+
+
+def _validate_caddy(content: str):
+    directory = os.path.dirname(CADDYFILE)
+    os.makedirs(directory, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(prefix=".Caddyfile.", dir=directory, text=True)
+    try:
+        with os.fdopen(fd, "w") as temp_file:
+            temp_file.write(content)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        try:
+            subprocess.run(
+                ["caddy", "validate", "--config", temp_path, "--adapter", "caddyfile"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as error:
+            detail = (error.stderr or error.stdout or str(error)).strip()
+            raise RuntimeError(f"Caddy config validation failed: {detail}") from error
+    finally:
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
 
 def _reload_caddy():
-    try:
-        subprocess.run(["systemctl", "reload", "caddy"], check=True)
-    except Exception as e:
-        print(f"[dmz-webui] Caddy reload failed: {e}, trying restart...")
-        try:
-            subprocess.run(["systemctl", "restart", "caddy"], check=True)
-        except Exception as e2:
-            print(f"[dmz-webui] Caddy restart also failed: {e2}")
-            raise
+    subprocess.run(["systemctl", "reload", "caddy"], check=True)
 
 # ----------------- Services -----------------
 

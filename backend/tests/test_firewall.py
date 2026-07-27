@@ -114,6 +114,32 @@ class OwnedApplyBatchTests(unittest.TestCase):
             run_nft.call_args_list[1].kwargs["input_text"], "owned batch\n"
         )
 
+    @patch("firewall._execute_checked_batch")
+    @patch("firewall._nft_object_exists", return_value=False)
+    def test_apply_replaces_only_the_changed_nat_table(self, _exists, execute):
+        updated = VALID_CONFIG.replace(
+            "policy accept\n    }",
+            "policy accept\n        tcp dport 8080 dnat to 10.0.0.10:80\n    }",
+        )
+
+        firewall.apply_owned_rules(
+            updated,
+            previous_config_text=VALID_CONFIG,
+        )
+
+        batch = execute.call_args.args[0]
+        self.assertIn("table ip dmz_webui_nat", batch)
+        self.assertNotIn("table inet dmz_webui_filter", batch)
+
+    @patch("firewall._execute_checked_batch")
+    def test_identical_config_does_not_reload_any_table(self, execute):
+        firewall.apply_owned_rules(
+            VALID_CONFIG,
+            previous_config_text=VALID_CONFIG,
+        )
+
+        execute.assert_not_called()
+
 
 class LegacyCleanupTests(unittest.TestCase):
     @patch("firewall._nft_object_exists")

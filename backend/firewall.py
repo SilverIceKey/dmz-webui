@@ -58,8 +58,7 @@ def _matching_brace(text: str, opening: int) -> int:
     raise FirewallConfigError("Unclosed nftables table block")
 
 
-def extract_owned_tables(config_text: str) -> str:
-    """Return a config containing exactly the two tables owned by this project."""
+def _parse_owned_tables(config_text: str) -> dict[tuple[str, str], str]:
     found: dict[tuple[str, str], str] = {}
     spans: list[tuple[int, int]] = []
 
@@ -101,6 +100,12 @@ def extract_owned_tables(config_text: str) -> str:
             f"Unsupported top-level nftables statement: {unsupported[0]}"
         )
 
+    return found
+
+
+def extract_owned_tables(config_text: str) -> str:
+    """Return a config containing exactly the two tables owned by this project."""
+    found = _parse_owned_tables(config_text)
     return "\n\n".join(found[key] for key in OWNED_TABLES) + "\n"
 
 
@@ -151,14 +156,20 @@ def _nft_object_exists(arguments: Iterable[str]) -> bool:
     return result.returncode == 0
 
 
-def build_owned_replace_batch(config_text: str) -> str:
+def build_owned_replace_batch(
+    config_text: str,
+    tables: Iterable[tuple[str, str]] = OWNED_TABLES,
+) -> str:
     """Build an atomic batch that replaces only project-owned tables."""
-    owned_config = extract_owned_tables(config_text)
+    found = _parse_owned_tables(config_text)
+    selected = tuple(tables)
     commands = []
-    for family, name in OWNED_TABLES:
+    for family, name in selected:
+        if (family, name) not in OWNED_TABLES:
+            raise FirewallConfigError(f"Refusing to replace non-DMZ table: {family} {name}")
         if _nft_object_exists(["table", family, name]):
             commands.append(f"delete table {family} {name}")
-    commands.append(owned_config.rstrip())
+    commands.extend(found[key] for key in selected)
     return "\n".join(commands) + "\n"
 
 
@@ -206,9 +217,24 @@ def _execute_checked_batch(batch: str) -> None:
         raise RuntimeError(f"nftables apply failed: {detail}") from error
 
 
-def apply_owned_rules(config_text: str, *, migrate_legacy: bool = False) -> None:
+def apply_owned_rules(
+    config_text: str,
+    *,
+    migrate_legacy: bool = False,
+    previous_config_text: str | None = None,
+) -> None:
     """Atomically replace DMZ WebUI tables and optionally clean its legacy objects."""
-    _execute_checked_batch(build_owned_replace_batch(config_text))
+    selected = OWNED_TABLES
+    if previous_config_text is not None:
+        current = _parse_owned_tables(config_text)
+        try:
+            previous = _parse_owned_tables(previous_config_text)
+        except FirewallConfigError:
+            previous = {}
+        selected = tuple(key for key in OWNED_TABLES if current[key] != previous.get(key))
+
+    if selected:
+        _execute_checked_batch(build_owned_replace_batch(config_text, selected))
 
     if migrate_legacy:
         cleanup_batch = build_legacy_cleanup_batch()
