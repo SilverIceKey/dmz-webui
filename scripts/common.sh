@@ -1,0 +1,365 @@
+#!/bin/bash
+# DMZ WebUI deploy/update 公共函数
+# 由 deploy.sh / update.sh source 使用
+
+CONFIG_FILE="/etc/dmz-webui/install.conf"
+
+# -------------- 配置收集与持久化 --------------
+
+validate_domain() {
+    local d="$1"
+    [[ -n "$d" ]] && [[ "$d" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$ ]]
+}
+
+mask_domain() {
+    local d="$1"
+    if [[ -z "$d" || "$d" == "example.com" ]]; then
+        echo "未配置"
+        return
+    fi
+    # 保留首段前两位和最后一段，中间脱敏
+    local prefix suffix
+    prefix="${d:0:2}"
+    suffix="${d##*.}"
+    echo "${prefix}***.${suffix}"
+}
+
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        # shellcheck source=/dev/null
+        set -a
+        # shellcheck source=/dev/null
+        source "$CONFIG_FILE"
+        set +a
+        return 0
+    fi
+    return 1
+}
+
+save_config() {
+    mkdir -p /etc/dmz-webui
+    cat > "$CONFIG_FILE" <<EOF
+# DMZ WebUI 部署配置（由 scripts/deploy.sh / scripts/update.sh 生成）
+# 时间戳: $(date '+%Y-%m-%d %H:%M:%S')
+DMZ_DOMAIN='${DMZ_DOMAIN}'
+DMZ_WEBUI_HOST='${DMZ_WEBUI_HOST:-127.0.0.1}'
+CADDY_MODE='${CADDY_MODE:-non443}'
+DMZ_CADDY_PORT='${DMZ_CADDY_PORT:-8443}'
+DMZ_CADDY_TLS_MODE='${DMZ_CADDY_TLS_MODE:-manual}'
+ACME_EMAIL='${ACME_EMAIL:-}'
+EOF
+    chmod 600 "$CONFIG_FILE"
+    info "部署配置已保存: $CONFIG_FILE（域名已脱敏: $(mask_domain "$DMZ_DOMAIN")）"
+}
+
+prompt_config() {
+    if load_config; then
+        local reuse
+        read -rp "检测到已有部署配置（域名: $(mask_domain "$DMZ_DOMAIN")），是否复用? [Y/n]: " reuse
+        if [[ "${reuse:-Y}" =~ ^[Yy]$ ]]; then
+            info "复用已有配置: $(mask_domain "$DMZ_DOMAIN")"
+            return 0
+        fi
+    fi
+
+    info "开始交互式收集部署配置..."
+
+    local domain_default="${DMZ_DOMAIN:-}"
+    while true; do
+        if [[ -n "$domain_default" ]]; then
+            read -rp "请输入公网域名 [${domain_default}]: " domain_input
+            DMZ_DOMAIN="${domain_input:-$domain_default}"
+        else
+            read -rp "请输入公网域名 (例如 home.example.com): " DMZ_DOMAIN
+        fi
+        if validate_domain "$DMZ_DOMAIN"; then
+            break
+        fi
+        warn "域名格式不正确，请重新输入"
+        domain_default=""
+    done
+
+    echo ""
+    echo "请选择 Caddy 部署模式："
+    echo "  1) 标准 443 端口 + Caddy 自动 HTTPS（需要域名已解析到本机，且 80/443 端口可达）"
+    echo "  2) 非 443 端口 8443 + Let's Encrypt DNS 证书 / 自签名（当前方式，443 被封锁或不方便暴露时使用）"
+    local mode_choice
+    read -rp "选项 [1/2，默认 2]: " mode_choice
+    case "${mode_choice:-2}" in
+        1)
+            CADDY_MODE="standard"
+            DMZ_CADDY_PORT=443
+            DMZ_CADDY_TLS_MODE="auto"
+            ;;
+        2|*)
+            CADDY_MODE="non443"
+            DMZ_CADDY_PORT=8443
+            DMZ_CADDY_TLS_MODE="manual"
+            ;;
+    esac
+    info "已选择 Caddy 模式: $CADDY_MODE (端口: $DMZ_CADDY_PORT)"
+
+    ACME_EMAIL=""
+    if [[ "$CADDY_MODE" == "standard" ]]; then
+        read -rp "请输入 ACME 邮箱（可选，留空则 Caddy 自动处理）: " ACME_EMAIL
+        if [[ -n "$ACME_EMAIL" && ! "$ACME_EMAIL" =~ ^[^@]+@[^@]+\.[^@]+$ ]]; then
+            warn "邮箱格式不正确，已忽略"
+            ACME_EMAIL=""
+        fi
+    fi
+
+    CF_API_KEY=""
+    CF_EMAIL=""
+    if [[ "$CADDY_MODE" == "non443" ]]; then
+        local use_cf
+        read -rp "是否使用 Cloudflare DNS 申请 Let's Encrypt 证书? [y/N]: " use_cf
+        if [[ "${use_cf:-N}" =~ ^[Yy]$ ]]; then
+            read -rsp "请输入 Cloudflare API Key: " CF_API_KEY
+            echo ""
+            read -rp "请输入 Cloudflare 邮箱: " CF_EMAIL
+            if [[ -z "$CF_API_KEY" || -z "$CF_EMAIL" ]]; then
+                warn "未提供完整的 Cloudflare 凭证，将使用自签名证书"
+                CF_API_KEY=""
+                CF_EMAIL=""
+            fi
+        fi
+    fi
+
+    local host_input
+    read -rp "请输入 WebUI 后端监听地址 [${DMZ_WEBUI_HOST:-127.0.0.1}]: " host_input
+    DMZ_WEBUI_HOST="${host_input:-${DMZ_WEBUI_HOST:-127.0.0.1}}"
+
+    save_config
+}
+
+# -------------- nftables 基础配置 --------------
+
+detect_ssh_ports() {
+    local ports
+    ports=$(ss -tlnp 2>/dev/null | awk '/sshd/ {
+        n = split($4, a, ":")
+        print a[n]
+    }' | sort -u | awk '{if(NR==1) out=$1; else out=out", "$1} END{print out}')
+    if [[ -n "$ports" ]]; then
+        echo "$ports"
+    else
+        echo "22"
+    fi
+}
+
+detect_wan_iface() {
+    local iface
+    iface=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')
+    if [[ -n "$iface" ]]; then
+        echo "$iface"
+    else
+        echo "eth0"
+    fi
+}
+
+configure_nftables_base() {
+    local base_file="${INSTALL_DIR:?}/configs/nftables.conf"
+    if [[ ! -f "$base_file" ]]; then
+        warn "未找到 nftables 基础配置: $base_file"
+        return 1
+    fi
+
+    local ssh_ports wan_iface
+    ssh_ports=$(detect_ssh_ports)
+    wan_iface=$(detect_wan_iface)
+
+    # 替换占位符
+    sed -i -e "s/<SSH_PORT>/${ssh_ports}/g" -e "s/<WAN_INTERFACE>/${wan_iface}/g" "$base_file"
+
+    # 根据 Caddy 模式调整 input 链放行端口
+    if [[ "${CADDY_MODE:-non443}" == "standard" ]]; then
+        sed -i 's/^\( *\)tcp dport 8443 accept/\1tcp dport 80 accept\n\1tcp dport 443 accept/' "$base_file"
+        info "nftables input 链已调整为放行 80/443（标准 443 模式）"
+    else
+        info "nftables input 链保持放行 8443（非 443 模式）"
+    fi
+
+    info "nftables 基础占位符已替换: SSH_PORTS=${ssh_ports}, WAN_IFACE=${wan_iface}"
+}
+
+# -------------- 证书申请 --------------
+
+ensure_certificate() {
+    USE_LE_CERT=0
+    CERT_DOMAIN="${DMZ_DOMAIN}"
+    CERT_DIR="/etc/letsencrypt/live/${CERT_DOMAIN}"
+
+    if [[ "${CADDY_MODE:-non443}" == "standard" ]]; then
+        info "标准 443 模式由 Caddy 自动处理 HTTPS 证书，跳过 certbot 申请"
+        USE_LE_CERT=0
+        return 0
+    fi
+
+    if [[ -f "${CERT_DIR}/fullchain.pem" ]] && [[ -f "${CERT_DIR}/privkey.pem" ]]; then
+        info "Let's Encrypt 证书已存在，跳过签发"
+        USE_LE_CERT=1
+        return 0
+    fi
+
+    if [[ -n "${CF_API_KEY:-}" ]] && [[ -n "${CF_EMAIL:-}" ]]; then
+        info "尝试使用 Cloudflare DNS 签发 Let's Encrypt 证书..."
+
+        if ! command -v certbot &>/dev/null; then
+            run_cmd "安装 certbot 及 Cloudflare 插件" apt-get install -y certbot python3-certbot-dns-cloudflare
+        fi
+
+        mkdir -p /etc/letsencrypt
+        tee /etc/letsencrypt/cloudflare.ini > /dev/null <<CFEOF
+dns_cloudflare_email = ${CF_EMAIL}
+dns_cloudflare_api_key = ${CF_API_KEY}
+CFEOF
+        chmod 600 /etc/letsencrypt/cloudflare.ini
+
+        # 注意：不通过 run_cmd 记录完整命令，避免 API Key 进入日志
+        info "执行 certbot certonly --dns-cloudflare ..."
+        if certbot certonly --dns-cloudflare --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
+            -d "${CERT_DOMAIN}" --agree-tos -m "${CF_EMAIL}" --non-interactive >> "$LOG_FILE" 2>&1; then
+            info "证书签发成功"
+            USE_LE_CERT=1
+        else
+            warn "证书签发失败，将使用自签名证书"
+            USE_LE_CERT=0
+        fi
+    else
+        info "未提供 Cloudflare 凭证，使用自签名证书"
+        USE_LE_CERT=0
+    fi
+}
+
+# -------------- Caddyfile 生成 --------------
+
+generate_caddyfile() {
+    local domain="${DMZ_DOMAIN}"
+    local host="${DMZ_WEBUI_HOST:-127.0.0.1}"
+    local mode="${CADDY_MODE:-non443}"
+    local tls_mode="${DMZ_CADDY_TLS_MODE:-manual}"
+    local email="${ACME_EMAIL:-}"
+    local site tls_line
+
+    if [[ "$mode" == "standard" ]]; then
+        site="${domain}"
+        if [[ "$tls_mode" == "auto" ]]; then
+            if [[ -n "$email" ]]; then
+                tls_line="tls ${email}"
+            else
+                tls_line=""
+            fi
+        else
+            tls_line="tls internal"
+        fi
+    else
+        site="${domain}:8443"
+        if [[ "${USE_LE_CERT:-0}" == "1" ]]; then
+            tls_line="tls /etc/letsencrypt/live/${domain}/fullchain.pem /etc/letsencrypt/live/${domain}/privkey.pem"
+        else
+            tls_line="tls internal"
+        fi
+    fi
+
+    info "生成 Caddyfile（模式: $mode, 站点: $(mask_domain "$site")）"
+
+    if [[ -n "$tls_line" ]]; then
+        tee /etc/caddy/Caddyfile > /dev/null <<CADDYEOF
+# DMZ WebUI 统一反代入口（模式: ${mode}）
+# 如需添加其他路径级反代，可通过 WebUI 的 SSL 代理功能或手动编辑此文件
+
+${site} {
+    encode gzip
+    ${tls_line}
+
+    route /admin* {
+        uri strip_prefix /admin
+        reverse_proxy ${host}:5000
+    }
+
+    route /assets* {
+        reverse_proxy ${host}:5000
+    }
+
+    redir / /admin 302
+}
+CADDYEOF
+    else
+        tee /etc/caddy/Caddyfile > /dev/null <<CADDYEOF
+# DMZ WebUI 统一反代入口（模式: ${mode}）
+# 如需添加其他路径级反代，可通过 WebUI 的 SSL 代理功能或手动编辑此文件
+
+${site} {
+    encode gzip
+
+    route /admin* {
+        uri strip_prefix /admin
+        reverse_proxy ${host}:5000
+    }
+
+    route /assets* {
+        reverse_proxy ${host}:5000
+    }
+
+    redir / /admin 302
+}
+CADDYEOF
+    fi
+
+    # 配置续期钩子（仅在非 443 模式且使用 LE 证书时）
+    if [[ "$mode" == "non443" && "${USE_LE_CERT:-0}" == "1" ]]; then
+        mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+        tee /etc/letsencrypt/renewal-hooks/deploy/restart-caddy.sh > /dev/null <<'HOOKEOF'
+#!/bin/bash
+chgrp -R caddy /etc/letsencrypt/live /etc/letsencrypt/archive
+chmod 750 /etc/letsencrypt/live /etc/letsencrypt/archive
+find /etc/letsencrypt/live -type f -exec chmod 640 {} \;
+find /etc/letsencrypt/archive -type f -exec chmod 640 {} \;
+systemctl restart caddy
+HOOKEOF
+        chmod +x /etc/letsencrypt/renewal-hooks/deploy/restart-caddy.sh
+        info "certbot 续期钩子已配置"
+    fi
+}
+
+# -------------- systemd 环境变量覆盖 --------------
+
+install_service_override() {
+    local dropin_dir="/etc/systemd/system/dmz-webui.service.d"
+    mkdir -p "$dropin_dir"
+    cat > "${dropin_dir}/override.conf" <<EOF
+[Service]
+Environment="DMZ_DOMAIN=${DMZ_DOMAIN}"
+Environment="DMZ_WEBUI_HOST=${DMZ_WEBUI_HOST:-127.0.0.1}"
+Environment="DMZ_CADDY_PORT=${DMZ_CADDY_PORT:-8443}"
+Environment="DMZ_CADDY_TLS_MODE=${DMZ_CADDY_TLS_MODE:-manual}"
+EOF
+    chmod 600 "${dropin_dir}/override.conf"
+    info "systemd 环境变量覆盖已写入: ${dropin_dir}/override.conf"
+}
+
+# -------------- ufw 迁移 --------------
+
+migrate_ufw() {
+    if ! command -v ufw &>/dev/null; then
+        info "未检测到 ufw，跳过迁移"
+        return 0
+    fi
+
+    warn "检测到系统已安装 ufw，将自动迁移到 nftables..."
+    mkdir -p /etc/dmz-webui
+    local backup_file="/etc/dmz-webui/ufw-backup-${TIMESTAMP:-$(date +%Y%m%d-%H%M%S)}.txt"
+    ufw status verbose numbered > "$backup_file" 2>/dev/null || true
+    info "ufw 规则已备份: $backup_file"
+
+    if ufw status 2>/dev/null | grep -q "Status: active"; then
+        info "ufw 当前为活动状态，正在禁用..."
+        ufw --force disable >> "$LOG_FILE" 2>&1 || warn "禁用 ufw 失败，请手动检查"
+    fi
+
+    if systemctl is-enabled ufw &>/dev/null; then
+        run_cmd "禁用 ufw 开机自启" systemctl disable ufw --now
+    fi
+
+    info "ufw 已迁移并禁用，后续防火墙规则由 nftables 统一管理"
+}

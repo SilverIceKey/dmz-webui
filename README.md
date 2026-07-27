@@ -44,22 +44,14 @@ dmz-webui/
 
 ## 首次部署
 
-部署前请根据实际情况配置环境变量（参考 `.env.example`）：
-
-```bash
-export DMZ_DOMAIN=your-domain.com
-export DMZ_WEBUI_HOST=127.0.0.1
-export DMZ_SECRET_KEY=$(openssl rand -hex 32)
-```
-
-将项目复制到目标服务器（DMZ 服务器 &lt;DMZ_WEBUI_HOST&gt;），然后执行：
+将项目复制到目标服务器，然后执行：
 
 ```bash
 cd /path/to/dmz-webui
 sudo ./scripts/deploy.sh
 ```
 
-`deploy.sh` 会自动完成：
+`deploy.sh` 会先交互式询问域名、Caddy 模式（标准 443 / 非 443 端口 8443）等配置，然后自动完成：
 1. 检查并安装系统依赖（python3, npm, nftables, caddy, libpam0g-dev）
 2. 备份旧版本（如存在）
 3. 复制项目到 `/opt/dmz-webui`
@@ -69,6 +61,9 @@ sudo ./scripts/deploy.sh
 7. 注册 systemd 服务并启动
 8. 健康检查（访问 `http://127.0.0.1:5000/api/status`）
 9. 同步 nftables 配置：以项目 `configs/nftables.conf` 为基准，保留用户自定义规则与 SSL 代理规则，并启用 nftables 开机自启
+
+> 如果系统已安装 `ufw`，脚本会自动备份并禁用 `ufw`，后续防火墙统一由 nftables 管理。
+> 你也可以提前设置环境变量 `DMZ_DOMAIN`、`DMZ_WEBUI_HOST`、`CF_API_KEY`、`CF_EMAIL`，脚本会将其作为默认值。
 
 **日志位置：** `/var/log/dmz-webui/deploy-<timestamp>.log`
 
@@ -110,7 +105,10 @@ sudo systemctl start dmz-webui
 
 ## 访问
 
-部署完成后访问：`http://<DMZ_WEBUI_HOST>:5000`
+部署完成后访问：
+
+- 标准 443 模式：`https://<DMZ_DOMAIN>/admin`
+- 非 443 模式（8443）：`https://<DMZ_DOMAIN>:8443/admin`
 
 使用目标服务器的 **Linux 系统账户** 登录。
 

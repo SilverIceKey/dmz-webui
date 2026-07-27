@@ -48,6 +48,12 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 mkdir -p "$LOG_DIR"
+
+# 加载公共函数并交互式收集配置
+source "$SCRIPT_DIR/common.sh"
+prompt_config
+migrate_ufw
+
 info "========================================"
 info "DMZ WebUI 部署开始"
 info "源目录: $PROJECT_ROOT"
@@ -290,6 +296,9 @@ else
     exit 1
 fi
 
+# 写入 systemd 环境变量覆盖，确保后端能读取 DMZ_DOMAIN/CADDY_PORT 等
+install_service_override
+
 # 重新加载 systemd
 if run_cmd "systemctl daemon-reload" systemctl daemon-reload; then
     info "systemd 重新加载完成"
@@ -396,89 +405,18 @@ fi
 # ----------------- Step 8: SSL 证书与 Caddy 配置 -----------------
 step "8/9 SSL 证书与 Caddy 配置"
 
-CERT_DOMAIN="${DMZ_DOMAIN:-example.com}"
-WEBUI_HOST="${DMZ_WEBUI_HOST:-127.0.0.1}"
-CERT_DIR="/etc/letsencrypt/live/${CERT_DOMAIN}"
-USE_LE_CERT=0
+ensure_certificate
+generate_caddyfile
 
-if [ -f "${CERT_DIR}/fullchain.pem" ] && [ -f "${CERT_DIR}/privkey.pem" ]; then
-    info "Let's Encrypt 证书已存在，跳过签发"
-    USE_LE_CERT=1
-else
-    if [ -n "${CF_API_KEY:-}" ] && [ -n "${CF_EMAIL:-}" ]; then
-        info "尝试使用 Cloudflare DNS 签发 Let's Encrypt 证书..."
-
-        if ! command -v certbot &>/dev/null; then
-            run_cmd "安装 certbot 及 Cloudflare 插件" apt-get install -y certbot python3-certbot-dns-cloudflare
-        fi
-
-        # 创建 Cloudflare credentials
-        sudo mkdir -p /etc/letsencrypt
-        sudo tee /etc/letsencrypt/cloudflare.ini > /dev/null <<CFEOF
-dns_cloudflare_email = ${CF_EMAIL}
-dns_cloudflare_api_key = ${CF_API_KEY}
-CFEOF
-        sudo chmod 600 /etc/letsencrypt/cloudflare.ini
-
-        if run_cmd "签发证书" certbot certonly --dns-cloudflare --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini -d "${CERT_DOMAIN}" --agree-tos -m "${CF_EMAIL}" --non-interactive; then
-            info "证书签发成功"
-            USE_LE_CERT=1
-        else
-            warn "证书签发失败，将使用自签名证书"
-            USE_LE_CERT=0
-        fi
-    else
-        info "未提供 CF_API_KEY / CF_EMAIL 环境变量，使用自签名证书"
-        info "如需自动签发 Let's Encrypt，请设置环境变量后重新部署:"
-        info "  export CF_API_KEY=你的Cloudflare_API_Key"
-        info "  export CF_EMAIL=你的Cloudflare邮箱"
-        USE_LE_CERT=0
-    fi
+# 修复证书权限（如适用）
+CERT_DIR="/etc/letsencrypt/live/${DMZ_DOMAIN}"
+if [ -f "${CERT_DIR}/fullchain.pem" ]; then
+    info "修复证书权限..."
+    chgrp -R caddy /etc/letsencrypt/live /etc/letsencrypt/archive 2>/dev/null || true
+    chmod 750 /etc/letsencrypt/live /etc/letsencrypt/archive 2>/dev/null || true
+    find /etc/letsencrypt/live -type f -exec chmod 640 {} \; 2>/dev/null || true
+    find /etc/letsencrypt/archive -type f -exec chmod 640 {} \; 2>/dev/null || true
 fi
-
-# 配置续期钩子（确保证书权限正确并重启 Caddy）
-if [ "$USE_LE_CERT" = "1" ]; then
-    sudo mkdir -p /etc/letsencrypt/renewal-hooks/deploy
-    sudo tee /etc/letsencrypt/renewal-hooks/deploy/restart-caddy.sh > /dev/null <<'HOOKEOF'
-#!/bin/bash
-chgrp -R caddy /etc/letsencrypt/live /etc/letsencrypt/archive
-chmod 750 /etc/letsencrypt/live /etc/letsencrypt/archive
-find /etc/letsencrypt/live -type f -exec chmod 640 {} \;
-find /etc/letsencrypt/archive -type f -exec chmod 640 {} \;
-systemctl restart caddy
-HOOKEOF
-    sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/restart-caddy.sh
-    info "certbot 续期钩子已配置"
-fi
-
-# 生成 Caddyfile
-info "生成 Caddyfile..."
-if [ "$USE_LE_CERT" = "1" ]; then
-    TLS_BLOCK="tls /etc/letsencrypt/live/${CERT_DOMAIN}/fullchain.pem /etc/letsencrypt/live/${CERT_DOMAIN}/privkey.pem"
-else
-    TLS_BLOCK="tls internal"
-fi
-
-sudo tee /etc/caddy/Caddyfile > /dev/null <<CADDYEOF
-# DMZ 统一反代入口（监听 8443）
-# 如需添加其他路径级反代，可通过 WebUI 的 SSL 代理功能或手动编辑此文件
-
-${CERT_DOMAIN}:8443 {
-    encode gzip
-    ${TLS_BLOCK}
-
-    route /admin* {
-        uri strip_prefix /admin
-        reverse_proxy ${WEBUI_HOST}:5000
-    }
-
-    route /assets* {
-        reverse_proxy ${WEBUI_HOST}:5000
-    }
-
-    redir / /admin 302
-}
-CADDYEOF
 
 # 重启 Caddy
 if run_cmd "重启 Caddy" systemctl restart caddy; then
@@ -491,6 +429,9 @@ if run_cmd "重启 Caddy" systemctl restart caddy; then
 else
     warn "Caddy 重启失败"
 fi
+
+# 根据 Caddy 模式配置 nftables 基础规则（替换占位符、放行对应端口）
+configure_nftables_base
 
 # ----------------- Step 9: nftables 放行 -----------------
 step "9/9 nftables 放行"
@@ -527,7 +468,11 @@ fi
 info "========================================"
 info "DMZ WebUI 部署完成"
 info "========================================"
-info "访问地址: https://${CERT_DOMAIN}:8443/admin"
+if [ "${CADDY_MODE:-non443}" = "standard" ]; then
+    info "访问地址: https://${DMZ_DOMAIN}/admin"
+else
+    info "访问地址: https://${DMZ_DOMAIN}:8443/admin"
+fi
 info "日志文件: $LOG_FILE"
 info "备份目录: ${INSTALL_DIR}.backup.${TIMESTAMP:-无}"
 info ""

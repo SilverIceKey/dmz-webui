@@ -90,6 +90,12 @@ if [ ! -d "$INSTALL_DIR" ]; then
 fi
 
 mkdir -p "$LOG_DIR"
+
+# 加载公共函数并读取/收集配置
+source "$SCRIPT_DIR/common.sh"
+prompt_config
+migrate_ufw
+
 info "========================================"
 info "DMZ WebUI 更新开始"
 info "源目录: $PROJECT_ROOT"
@@ -283,12 +289,15 @@ if [ -f "$INSTALL_DIR/systemd/dmz-webui.service" ]; then
     if ! diff -q "$INSTALL_DIR/systemd/dmz-webui.service" /etc/systemd/system/dmz-webui.service &>/dev/null; then
         info "systemd service 文件有更新"
         run_cmd "复制新 service 文件" cp "$INSTALL_DIR/systemd/dmz-webui.service" /etc/systemd/system/
-        run_cmd "daemon-reload" systemctl daemon-reload
         SERVICE_CHANGED=true
     else
         info "systemd service 文件无变化"
     fi
 fi
+
+# 刷新 systemd 环境变量覆盖（域名/Caddy 模式等可能已变更）
+install_service_override
+run_cmd "daemon-reload" systemctl daemon-reload
 
 SVC_STATUS_BEFORE=$(systemctl is-active dmz-webui 2>/dev/null || echo "unknown")
 if [ "$SVC_STATUS_BEFORE" = "active" ]; then
@@ -323,10 +332,13 @@ if [ "$SVC_STATUS" != "active" ]; then
     rollback
 fi
 
-# Caddy 重启及证书权限检查
+# Caddy 证书、Caddyfile 与服务
 info "检查 Caddy 及证书状态..."
-CERT_DOMAIN="${DMZ_DOMAIN:-example.com}"
-CERT_DIR="/etc/letsencrypt/live/${CERT_DOMAIN}"
+
+ensure_certificate
+generate_caddyfile
+
+CERT_DIR="/etc/letsencrypt/live/${DMZ_DOMAIN}"
 if [ -f "${CERT_DIR}/fullchain.pem" ]; then
     info "修复证书权限..."
     chgrp -R caddy /etc/letsencrypt/live /etc/letsencrypt/archive 2>/dev/null || true
@@ -345,6 +357,9 @@ if run_cmd "重启 Caddy" systemctl restart caddy; then
 else
     warn "Caddy 重启失败"
 fi
+
+# 根据 Caddy 模式配置 nftables 基础规则
+configure_nftables_base
 
 # ----------------- Step 7: 确保 nftables 配置生效 -----------------
 step "7/9 确保 nftables 配置生效"
@@ -456,7 +471,11 @@ done
 info "========================================"
 info "DMZ WebUI 更新完成"
 info "========================================"
-info "访问地址: http://$(hostname -I | awk '{print $1}'):5000"
+if [ "${CADDY_MODE:-non443}" = "standard" ]; then
+    info "访问地址: https://${DMZ_DOMAIN}/admin"
+else
+    info "访问地址: https://${DMZ_DOMAIN}:8443/admin"
+fi
 info "日志文件: $LOG_FILE"
 info "回滚备份: $ROLLBACK_DIR"
 info ""

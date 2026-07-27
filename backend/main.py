@@ -46,6 +46,8 @@ ALGORITHM = "HS256"
 # Public domain / host used by Caddy reverse proxy generation
 DMZ_DOMAIN = os.environ.get("DMZ_DOMAIN", "example.com")
 DMZ_WEBUI_HOST = os.environ.get("DMZ_WEBUI_HOST", "127.0.0.1")
+DMZ_CADDY_PORT = int(os.environ.get("DMZ_CADDY_PORT", "8443"))
+DMZ_CADDY_TLS_MODE = os.environ.get("DMZ_CADDY_TLS_MODE", "manual")
 security = HTTPBearer()
 
 # Paths
@@ -124,8 +126,8 @@ class SslProxyRuleCreate(BaseModel):
     def validate_port(cls, v: int) -> int:
         if not 1 <= v <= 65535:
             raise ValueError("port must be between 1 and 65535")
-        if v == 8443:
-            raise ValueError("port 8443 is reserved for WebUI")
+        if v == DMZ_CADDY_PORT:
+            raise ValueError(f"port {DMZ_CADDY_PORT} is reserved for WebUI")
         return v
 
     @field_validator("dest_ip")
@@ -408,8 +410,8 @@ def _apply_ssl_proxy_rules():
 
 def _check_port_conflict(port: int, exclude_rule_id: Optional[int] = None):
     """检查端口是否和 WebUI、现有 SSL 代理规则或防火墙规则冲突。"""
-    if port == 8443:
-        raise HTTPException(status_code=400, detail="Port 8443 is reserved for WebUI")
+    if port == DMZ_CADDY_PORT:
+        raise HTTPException(status_code=400, detail=f"Port {DMZ_CADDY_PORT} is reserved for WebUI")
 
     ssl_rules = _load_ssl_proxy_rules()
     for r in ssl_rules:
@@ -614,13 +616,17 @@ def _regenerate_caddyfile():
     domain = DMZ_DOMAIN
 
     if settings.get("https_enabled", True):
-        tls_line = _tls_line(domain)
+        if DMZ_CADDY_TLS_MODE == "auto":
+            tls_line = ""
+        else:
+            tls_line = _tls_line(domain)
     else:
         tls_line = "auto_https off"
 
-    lines = [f"{domain}:8443 {{"]
+    lines = [f"{domain}:{DMZ_CADDY_PORT} {{"]
     lines.append("    encode gzip")
-    lines.append(f"    {tls_line}")
+    if tls_line:
+        lines.append(f"    {tls_line}")
     lines.append("")
 
     # WebUI routes only
