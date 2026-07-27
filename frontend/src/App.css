@@ -181,6 +181,29 @@ body {
   box-shadow: 0 10px 40px rgba(0,0,0,0.3);
 }
 
+.login-panel {
+  width: min(360px, calc(100vw - 32px));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+.login-panel .login-card {
+  width: 100%;
+}
+
+.login-icp {
+  color: #b2bec3;
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.login-icp:hover {
+  color: #fff;
+  text-decoration: underline;
+}
+
 .login-card h1 {
   margin-bottom: 20px;
   text-align: center;

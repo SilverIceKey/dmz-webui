@@ -53,7 +53,8 @@ cd /path/to/dmz-webui
 sudo ./scripts/deploy.sh
 ```
 
-`deploy.sh` 会先交互式询问域名、Caddy 模式（标准 443 / 非 443 端口 8443）等配置，然后自动完成：
+`deploy.sh` 会先交互式询问域名、Caddy 模式（标准 443 / 非 443 端口
+8443）、可选 ICP 备案号等配置，然后自动完成：
 1. 检查并安装系统依赖（python3, npm, nftables, caddy, libpam0g-dev）
 2. 备份旧版本（如存在）
 3. 复制项目到 `/opt/dmz-webui`
@@ -70,7 +71,10 @@ sudo ./scripts/deploy.sh
 Docker、iptables-nft 及其他程序管理的表和链不属于 DMZ WebUI 的修改范围。
 
 > 如果系统已安装 `ufw`，脚本会自动备份并禁用 `ufw`，后续防火墙统一由 nftables 管理。
-> 你也可以提前设置环境变量 `DMZ_DOMAIN`、`DMZ_WEBUI_HOST`、`CF_API_KEY`、`CF_EMAIL`，脚本会将其作为默认值。
+> 你也可以提前设置环境变量 `DMZ_DOMAIN`、`DMZ_WEBUI_HOST`、
+> `DMZ_ICP_NUMBER`、`CF_API_KEY`、`CF_EMAIL`，脚本会将其作为默认值。
+> `DMZ_ICP_NUMBER` 留空时登录页不显示备案链接；配置会保存在
+> `/etc/dmz-webui/install.conf` 并由后续更新复用。
 
 **日志位置：** `/var/log/dmz-webui/deploy-<timestamp>.log`
 

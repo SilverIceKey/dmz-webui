@@ -52,6 +52,7 @@ DMZ_DOMAIN = os.environ.get("DMZ_DOMAIN", "example.com")
 DMZ_WEBUI_HOST = os.environ.get("DMZ_WEBUI_HOST", "127.0.0.1")
 DMZ_CADDY_PORT = int(os.environ.get("DMZ_CADDY_PORT", "8443"))
 DMZ_CADDY_TLS_MODE = os.environ.get("DMZ_CADDY_TLS_MODE", "manual")
+DMZ_ICP_NUMBER = os.environ.get("DMZ_ICP_NUMBER", "").strip()
 security = HTTPBearer()
 
 # Paths
@@ -169,6 +170,9 @@ class ApplyRequest(BaseModel):
 class AppSettings(BaseModel):
     https_enabled: bool = True
 
+class PublicConfig(BaseModel):
+    icp_number: str = ""
+
 # ----------------- Settings -----------------
 
 def load_settings() -> dict:
@@ -230,6 +234,10 @@ def login(req: LoginRequest):
     return {"token": token}
 
 # ----------------- Settings API -----------------
+
+@app.get("/api/public-config", response_model=PublicConfig)
+def get_public_config():
+    return {"icp_number": DMZ_ICP_NUMBER}
 
 @app.get("/api/settings")
 def get_settings(_: str = Depends(verify_token)):

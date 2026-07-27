@@ -2,8 +2,8 @@
 
 ## 当前主任务
 
-nftables 所有权收敛及保存/删除误报事务修复已完成，下一阶段是目标服务器部署
-联调、成功响应与 Docker 连通性验收。
+登录页动态备案号配置、nftables 所有权收敛及保存/删除误报事务修复均已完成，
+下一阶段是目标服务器部署与浏览器/网络联调验收。
 
 ## 当前入口
 
@@ -14,12 +14,15 @@ nftables 所有权收敛及保存/删除误报事务修复已完成，下一阶�
 - 收口报告：`docs/reports/REPORT-20260727-nftables-ownership-v1.md`
 - 保存/删除误报报告：
   `docs/reports/REPORT-20260727-rule-mutation-response-v1.md`
+- 登录页备案号进度：
+  `docs/progress/PROGRESS-20260727-login-icp-footer-v1.md`
+- 动态备案号配置入口：`scripts/common.sh`、`GET /api/public-config`
 - 已归档计划：
   `docs/archive/plans/PLAN-20260727-nftables-ownership-v1.md`
 
 ## 固定验收
 
-- `python3 -m unittest discover -s backend/tests -v`（当前 20 项）
+- `python3 -m unittest discover -s backend/tests -v`（当前 24 项）
 - `npm run build`（工作目录 `frontend`）
 - 隔离或真实环境确认 `DOCKER`/外部哨兵链在应用项目规则后保持不变。
 

@@ -30,6 +30,10 @@ export const auth = {
     api.post('/auth/login', { username, password }),
 };
 
+export const publicConfig = {
+  get: () => api.get('/public-config'),
+};
+
 export const sslProxy = {
   list: () => api.get('/ssl-proxy/rules'),
   create: (data: any) => api.post('/ssl-proxy/rules', data),

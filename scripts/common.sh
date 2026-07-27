@@ -11,6 +11,11 @@ validate_domain() {
     [[ -n "$d" ]] && [[ "$d" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$ ]]
 }
 
+validate_icp_number() {
+    local value="$1"
+    [[ -z "$value" ]] || [[ "$value" =~ ^[京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼]ICP备[0-9]+号(-[0-9]+)?$ ]]
+}
+
 mask_domain() {
     local d="$1"
     if [[ -z "$d" || "$d" == "example.com" ]]; then
@@ -46,6 +51,7 @@ DMZ_WEBUI_HOST='${DMZ_WEBUI_HOST:-127.0.0.1}'
 CADDY_MODE='${CADDY_MODE:-non443}'
 DMZ_CADDY_PORT='${DMZ_CADDY_PORT:-8443}'
 DMZ_CADDY_TLS_MODE='${DMZ_CADDY_TLS_MODE:-manual}'
+DMZ_ICP_NUMBER='${DMZ_ICP_NUMBER:-}'
 ACME_EMAIL='${ACME_EMAIL:-}'
 EOF
     chmod 600 "$CONFIG_FILE"
@@ -128,6 +134,25 @@ prompt_config() {
     local host_input
     read -rp "请输入 WebUI 后端监听地址 [${DMZ_WEBUI_HOST:-127.0.0.1}]: " host_input
     DMZ_WEBUI_HOST="${host_input:-${DMZ_WEBUI_HOST:-127.0.0.1}}"
+
+    local icp_default="${DMZ_ICP_NUMBER:-}"
+    while true; do
+        if [[ -n "$icp_default" ]]; then
+            read -rp "请输入 ICP 备案号 [${icp_default}]（输入 - 清空）: " icp_input
+            if [[ "$icp_input" == "-" ]]; then
+                DMZ_ICP_NUMBER=""
+            else
+                DMZ_ICP_NUMBER="${icp_input:-$icp_default}"
+            fi
+        else
+            read -rp "请输入 ICP 备案号（可选，留空不显示，例如：浙ICP备12345678号）: " DMZ_ICP_NUMBER
+        fi
+        if validate_icp_number "$DMZ_ICP_NUMBER"; then
+            break
+        fi
+        warn "ICP备案号格式不正确，请重新输入"
+        icp_default=""
+    done
 
     save_config
 }
@@ -333,6 +358,7 @@ Environment="DMZ_DOMAIN=${DMZ_DOMAIN}"
 Environment="DMZ_WEBUI_HOST=${DMZ_WEBUI_HOST:-127.0.0.1}"
 Environment="DMZ_CADDY_PORT=${DMZ_CADDY_PORT:-8443}"
 Environment="DMZ_CADDY_TLS_MODE=${DMZ_CADDY_TLS_MODE:-manual}"
+Environment="DMZ_ICP_NUMBER=${DMZ_ICP_NUMBER:-}"
 EOF
     chmod 600 "${dropin_dir}/override.conf"
     info "systemd 环境变量覆盖已写入: ${dropin_dir}/override.conf"

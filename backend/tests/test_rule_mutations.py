@@ -134,6 +134,14 @@ class CaddyReloadTests(unittest.TestCase):
 
 
 class EndpointMutationTests(unittest.TestCase):
+    def test_public_config_exposes_only_the_icp_number_without_auth(self):
+        with patch.object(main, "DMZ_ICP_NUMBER", "浙ICP备12345678号"):
+            result = main.get_public_config()
+
+        self.assertEqual(result, {"icp_number": "浙ICP备12345678号"})
+        route = next(route for route in main.app.routes if route.path == "/api/public-config")
+        self.assertEqual(route.dependant.dependencies, [])
+
     @patch.object(main, "_apply_ssl_proxy_rules", side_effect=RuntimeError("apply failed"))
     @patch.object(main, "_load_ssl_proxy_rules", return_value=[])
     def test_ssl_create_failure_reports_rollback(self, _load, _apply):
