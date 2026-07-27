@@ -189,7 +189,10 @@ export default function Dashboard() {
   }, []);
 
   const handleApply = async (svc: string) => {
-    if (!confirm(`确定要重载 ${svc} 吗？`)) return;
+    const action = svc === 'nftables'
+      ? '重新应用 DMZ WebUI 管理的防火墙规则'
+      : `重载 ${svc}`;
+    if (!confirm(`确定要${action}吗？`)) return;
     try {
       await services.apply(svc);
       alert('重载成功');
@@ -213,7 +216,7 @@ export default function Dashboard() {
               </div>
               <div style={{ marginTop: 12 }}>
                 <button className="btn btn-warning" onClick={() => handleApply(s.name)}>
-                  重载
+                  {s.name === 'nftables' ? '应用项目规则' : '重载'}
                 </button>
               </div>
             </div>

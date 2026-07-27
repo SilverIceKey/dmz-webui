@@ -364,31 +364,38 @@ configure_nftables_base
 # ----------------- Step 7: 确保 nftables 配置生效 -----------------
 step "7/9 确保 nftables 配置生效"
 
-NFT_CONF="/etc/nftables.conf"
 SYNC_SCRIPT="$INSTALL_DIR/scripts/sync_nftables.py"
+APPLY_SCRIPT="$INSTALL_DIR/scripts/apply_nftables.py"
 
 if [ -f "$SYNC_SCRIPT" ]; then
     info "同步 nftables 配置（保留用户自定义规则与 SSL 代理规则）..."
     if run_cmd "同步 nftables 配置" python3 "$SYNC_SCRIPT"; then
         info "nftables 配置同步完成"
     else
-        warn "nftables 配置同步失败，请手动检查配置"
+        error "nftables 配置同步失败"
+        rollback
     fi
 else
-    warn "未找到同步脚本 $SYNC_SCRIPT，跳过自动同步"
+    error "未找到同步脚本 $SYNC_SCRIPT"
+    rollback
 fi
 
+# 只应用 DMZ WebUI 独占表；禁止重启 nftables 或完整加载全局规则集
+if [ -f "$APPLY_SCRIPT" ]; then
+    if run_cmd "定向应用 DMZ WebUI nftables 规则" python3 "$APPLY_SCRIPT" --migrate-legacy; then
+        info "DMZ WebUI nftables 规则已生效，外部表未重载"
+    else
+        error "DMZ WebUI nftables 规则应用失败"
+        rollback
+    fi
+else
+    error "未找到定向应用脚本 $APPLY_SCRIPT"
+    rollback
+fi
+
+# 只设置开机自启；运行时不得重启 nftables，以免影响 Docker/外部规则
 if run_cmd "启用 nftables 开机自启" systemctl enable nftables; then
     info "nftables 开机自启已启用"
-fi
-
-if run_cmd "重启 nftables 服务" systemctl restart nftables; then
-    info "nftables 服务重启完成"
-else
-    warn "nftables 服务重启失败，尝试直接重载配置..."
-    if run_cmd "直接重载 nftables" nft -f "$NFT_CONF"; then
-        info "nftables 配置已直接重载"
-    fi
 fi
 
 # ----------------- Step 8: 检查并持久化 IP 转发 -----------------

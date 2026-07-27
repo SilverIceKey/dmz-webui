@@ -22,6 +22,7 @@ DMZ 网络管控 Web 管理界面。基于 React + TypeScript 前端、Python Fa
 dmz-webui/
 ├── backend/
 │   ├── main.py              # FastAPI 主程序
+│   ├── firewall.py          # 项目独占 nftables 表的校验与定向应用
 │   ├── requirements.txt     # Python 依赖
 │   └── static/              # 前端构建产物（部署时生成）
 ├── frontend/
@@ -38,6 +39,7 @@ dmz-webui/
 │   └── dmz-webui.service    # systemd 服务文件
 ├── scripts/
 │   ├── deploy.sh            # 首次部署脚本
+│   ├── apply_nftables.py    # 仅应用本项目拥有的 nftables 表
 │   └── update.sh            # 增量更新脚本（含自动回滚）
 └── README.md
 ```
@@ -60,7 +62,12 @@ sudo ./scripts/deploy.sh
 6. 检查后端语法
 7. 注册 systemd 服务并启动
 8. 健康检查（访问 `http://127.0.0.1:5000/api/status`）
-9. 同步 nftables 配置：以项目 `configs/nftables.conf` 为基准，保留用户自定义规则与 SSL 代理规则，并启用 nftables 开机自启
+9. 同步 nftables 配置：迁移现有项目规则后，只定向应用
+   `inet dmz_webui_filter` 和 `ip dmz_webui_nat` 两个项目独占表，并启用
+   nftables 开机自启
+
+部署和页面操作不会执行 `flush ruleset`，也不会重启整个 nftables 服务。
+Docker、iptables-nft 及其他程序管理的表和链不属于 DMZ WebUI 的修改范围。
 
 > 如果系统已安装 `ufw`，脚本会自动备份并禁用 `ufw`，后续防火墙统一由 nftables 管理。
 > 你也可以提前设置环境变量 `DMZ_DOMAIN`、`DMZ_WEBUI_HOST`、`CF_API_KEY`、`CF_EMAIL`，脚本会将其作为默认值。
@@ -82,7 +89,7 @@ sudo ./scripts/update.sh
 3. **依赖更新**：Python 增量更新，前端按需 `npm install`
 4. **重新构建**：前端重新编译
 5. **平滑重启**：重启 systemd 服务并等待就绪
-6. **nftables 同步**：确保 nftables 配置与项目基准同步并重启服务
+6. **nftables 同步**：确保项目独占表与配置同步，不重启全局 nftables 服务
 7. **健康检查**：多次重试验证 API 和页面可访问
 8. **失败回滚**：任何步骤失败自动恢复旧版本并重启服务
 
@@ -141,4 +148,6 @@ ls -1dt /opt/dmz-webui.rollback.* | tail -n +6 | xargs rm -rf
 - `update.sh` 会保留虚拟环境和日志，更新时不会重复下载全部依赖
 - 回滚备份最多保留 5 个，旧的会自动清理
 - **nftables 持久化**：`dmz-webui.service` 已依赖 `nftables.service`，确保系统重启时 nftables 先于 WebUI 加载 `/etc/nftables.conf`
+- **nftables 所有权**：运行时仅替换 `inet dmz_webui_filter` 和
+  `ip dmz_webui_nat`；禁止通过本项目清空全局 ruleset 或重载其他程序的规则
 - **IP 转发持久化**：通过 `/etc/sysctl.d/99-dmz-webui-forwarding.conf` 持久化 `ip_forward`，并在 `dmz-webui.service` 的 `ExecStartPre` 中做运行时兜底

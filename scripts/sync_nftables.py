@@ -16,6 +16,13 @@ import shutil
 import sys
 from datetime import datetime
 
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BACKEND_DIR = os.path.join(PROJECT_ROOT, "backend")
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
+
+from firewall import extract_named_block, replace_named_block  # noqa: E402
+
 PROJECT_NFT = "/opt/dmz-webui/configs/nftables.conf"
 RUNTIME_NFT = "/etc/nftables.conf"
 SSL_PROXY_RULES = "/etc/dmz-webui/ssl_proxy_rules.json"
@@ -111,9 +118,9 @@ def extract_cn_ipv4_set(text: str) -> str | None:
 def replace_or_insert_cn_ipv4_set(text: str, set_block: str | None) -> str:
     if set_block is None:
         return text
-    pattern = r"\s*set\s+cn_ipv4\s*\{[^}]+flags\s+interval[^}]*elements\s*=\s*\{[^}]*\}\s*\}"
-    if re.search(pattern, text, re.DOTALL):
-        return re.sub(pattern, "\n" + set_block, text, count=1, flags=re.DOTALL)
+    match = re.search(r"(?m)^[ \t]*set\s+cn_ipv4\s*\{", text)
+    if match:
+        return replace_named_block(text, "set cn_ipv4", set_block)
     # Insert before chain prerouting
     idx = text.find("chain prerouting {")
     if idx == -1:
@@ -151,11 +158,13 @@ def main():
         print("Preserved existing cn_ipv4 set")
 
     # Identify project base DNAT rules
-    base_rules = parse_dnat_rules(base_text)
+    base_prerouting = extract_named_block(base_text, "chain prerouting") or ""
+    base_rules = parse_dnat_rules(base_prerouting)
     base_keys = {rule_key(r) for r in base_rules}
 
     # Identify user-added DNAT rules in runtime that are not in base and not ssl-proxy managed
-    runtime_rules = parse_dnat_rules(runtime_text)
+    runtime_prerouting = extract_named_block(runtime_text, "chain prerouting") or ""
+    runtime_rules = parse_dnat_rules(runtime_prerouting)
     extra_rules = [
         r for r in runtime_rules
         if rule_key(r) not in base_keys and not r["comment"].startswith("ssl-proxy")

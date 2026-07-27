@@ -123,7 +123,7 @@ function RuleModal({
                 checked={form.ssl_enabled}
                 onChange={(e) => setForm({ ...form, ssl_enabled: e.target.checked })}
               />
-              启用 SSL（通过 Caddy 提供 https://<your-domain>:端口）
+              启用 SSL（通过 Caddy 提供 https://&lt;your-domain&gt;:端口）
             </label>
           </div>
           <div className="form-group">

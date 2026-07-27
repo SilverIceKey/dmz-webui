@@ -4,6 +4,8 @@ import subprocess
 import json
 import time
 import threading
+import stat
+import tempfile
 from typing import List, Optional
 from datetime import datetime
 
@@ -15,6 +17,8 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, field_validator, model_validator
 import jwt
 import pam
+
+from firewall import apply_owned_rules, replace_named_block
 
 app = FastAPI(title="DMZ WebUI")
 
@@ -248,9 +252,35 @@ def _read_nftables() -> str:
             return f.read()
     return ""
 
-def _write_nftables(content: str):
-    with open(NFTABLES_CONF, "w") as f:
-        f.write(content)
+def _commit_nftables(content: str):
+    """Apply project-owned tables, then atomically persist the validated config."""
+    old_content = _read_nftables()
+    config_dir = os.path.dirname(NFTABLES_CONF)
+    os.makedirs(config_dir, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(prefix=".nftables.", dir=config_dir, text=True)
+    applied = False
+    try:
+        if os.path.exists(NFTABLES_CONF):
+            os.fchmod(fd, stat.S_IMODE(os.stat(NFTABLES_CONF).st_mode))
+        with os.fdopen(fd, "w") as temp_file:
+            temp_file.write(content)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+
+        apply_owned_rules(content)
+        applied = True
+        os.replace(temp_path, NFTABLES_CONF)
+    except Exception:
+        if applied and old_content:
+            try:
+                apply_owned_rules(old_content)
+            except Exception as rollback_error:
+                print(f"[dmz-webui] nftables runtime rollback failed: {rollback_error}")
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+        raise
 
 def _build_whitelist_prefix(whitelist_type: str, whitelist_ips: str) -> str:
     if whitelist_type == "cn":
@@ -363,6 +393,7 @@ def _remove_ssl_proxy_nft_rules(text: str) -> str:
         new_lines.append(line)
     return "\n".join(new_lines)
 
+
 def _insert_into_chain(text: str, chain_name: str, new_lines: List[str]) -> str:
     """在指定 chain 的结束 '}' 前插入新行。"""
     if not new_lines:
@@ -405,8 +436,7 @@ def _apply_ssl_proxy_rules():
 
     text = _insert_into_chain(text, "input", input_lines)
     text = _insert_into_chain(text, "prerouting", prerouting_lines)
-    _write_nftables(text)
-    subprocess.run(["nft", "-f", NFTABLES_CONF], check=True)
+    _commit_nftables(text)
 
 def _check_port_conflict(port: int, exclude_rule_id: Optional[int] = None):
     """检查端口是否和 WebUI、现有 SSL 代理规则或防火墙规则冲突。"""
@@ -489,14 +519,13 @@ def _update_cn_ipset() -> bool:
     }}"""
 
         if 'set cn_ipv4 {' in text:
-            text = re.sub(r'    set cn_ipv4 \{[^}]*\}[^}]*\}', set_block, text, count=1, flags=re.DOTALL)
+            text = replace_named_block(text, "set cn_ipv4", set_block)
         else:
             idx = text.find('chain prerouting {')
             if idx != -1:
                 text = text[:idx] + set_block + '\n\n' + text[idx:]
 
-        _write_nftables(text)
-        subprocess.run(["nft", "-f", NFTABLES_CONF], check=True)
+        _commit_nftables(text)
         return True
     except Exception as e:
         print(f"[dmz-webui] CN ipset update failed: {e}")
@@ -511,8 +540,7 @@ def get_nft_rules(_: str = Depends(verify_token)):
 def create_nft_rule(rule: NfRuleCreate, _: str = Depends(verify_token)):
     text = _read_nftables()
     text = _add_nft_rule(text, rule)
-    _write_nftables(text)
-    subprocess.run(["nft", "-f", NFTABLES_CONF], check=True)
+    _commit_nftables(text)
     return {"ok": True}
 
 @app.put("/api/nftables/rules/{protocol}/{port}")
@@ -522,16 +550,14 @@ def edit_nft_rule(protocol: str, port: int, old_dest_ip: str = Query(...), old_d
     text = _read_nftables()
     text = _remove_nft_rule(text, port, protocol, old_dest_ip, old_dest_port)
     text = _add_nft_rule(text, rule)
-    _write_nftables(text)
-    subprocess.run(["nft", "-f", NFTABLES_CONF], check=True)
+    _commit_nftables(text)
     return {"ok": True}
 
 @app.delete("/api/nftables/rules/{protocol}/{port}")
 def delete_nft_rule(protocol: str, port: int, dest_ip: str = Query(...), dest_port: int = Query(...), _: str = Depends(verify_token)):
     text = _read_nftables()
     text = _remove_nft_rule(text, port, protocol, dest_ip, dest_port)
-    _write_nftables(text)
-    subprocess.run(["nft", "-f", NFTABLES_CONF], check=True)
+    _commit_nftables(text)
     return {"ok": True}
 
 @app.post("/api/nftables/update-cn-ipset")
@@ -695,7 +721,7 @@ def apply_service(req: ApplyRequest, _: str = Depends(verify_token)):
         services_list = [req.service]
     for svc in services_list:
         if svc == "nftables":
-            subprocess.run(["nft", "-f", NFTABLES_CONF], check=True)
+            apply_owned_rules(_read_nftables())
         elif svc == "caddy":
             _reload_caddy()
         else:
