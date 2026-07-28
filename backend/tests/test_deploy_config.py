@@ -94,13 +94,15 @@ class DeployConfigTests(unittest.TestCase):
             'Environment="DMZ_TAB_TITLE=${DMZ_TAB_TITLE:-DMZ WebUI}"',
             source,
         )
+        self.assertIn("DMZ_ROUTE_DOMAIN=", source)
+        self.assertIn('Environment="DMZ_ROUTE_DOMAIN=', source)
 
     def test_existing_config_confirms_groups_and_only_changes_branding(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config_file = Path(temp_dir) / "install.conf"
             config_file.write_text(
                 "\n".join([
-                    "DMZ_DOMAIN='example.com'",
+                    "DMZ_DOMAIN='www.example.com'",
                     "DMZ_WEBUI_HOST='127.0.0.1'",
                     "CADDY_MODE='standard'",
                     "DMZ_CADDY_PORT='443'",
@@ -125,7 +127,8 @@ class DeployConfigTests(unittest.TestCase):
                 "n\n"
                 "INPUT\n"
                 "source \"$CONFIG_FILE\"\n"
-                'test "$DMZ_DOMAIN" = "example.com"\n'
+                'test "$DMZ_DOMAIN" = "www.example.com"\n'
+                'test "$DMZ_ROUTE_DOMAIN" = "example.com"\n'
                 'test "$CADDY_MODE" = "standard"\n'
                 'test "$DMZ_CADDY_PORT" = "443"\n'
                 'test "$DMZ_CADDY_TLS_MODE" = "auto"\n'
@@ -157,11 +160,26 @@ class DeployConfigTests(unittest.TestCase):
             "\n"
             "\n"
             "\n"
+            "\n"
             "INPUT\n"
             'test "$CADDY_MODE" = "standard"\n'
             'test "$DMZ_CADDY_PORT" = "443"\n'
             'test "$DMZ_CADDY_TLS_MODE" = "auto"\n'
             'test "$ACME_EMAIL" = "ops@example.com"\n'
+        )
+        result = subprocess.run(
+            ["bash", "-uo", "pipefail", "-c", script],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_legacy_www_domain_defaults_route_domain_to_parent(self):
+        script = (
+            f"source {COMMON_SH!s}\n"
+            'test "$(default_route_domain www.silvericekey.top)" '
+            '= "silvericekey.top"\n'
+            'test "$(default_route_domain example.com)" = "example.com"\n'
         )
         result = subprocess.run(
             ["bash", "-uo", "pipefail", "-c", script],

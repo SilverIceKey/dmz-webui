@@ -42,9 +42,45 @@ STATIC_ROUTE = {
 
 
 class SiteRouteValidationTests(unittest.TestCase):
+    def test_default_route_domain_strips_only_www_prefix(self):
+        self.assertEqual(
+            main._default_route_domain("www.silvericekey.top"),
+            "silvericekey.top",
+        )
+        self.assertEqual(
+            main._default_route_domain("example.com"),
+            "example.com",
+        )
+        with (
+            patch.object(main, "DMZ_DOMAIN", "www.example.com"),
+            patch.dict(main.os.environ, {"DMZ_ROUTE_DOMAIN": "com"}),
+        ):
+            self.assertEqual(
+                main._configured_route_domain(),
+                "example.com",
+            )
+
     def test_accepts_main_domain_and_subdomain(self):
         with (
             patch.object(main, "DMZ_DOMAIN", "example.com"),
+            patch.object(main, "DMZ_ROUTE_DOMAIN", "example.com"),
+            patch.object(main, "DMZ_CADDY_PORT", 443),
+        ):
+            route = main.SiteRouteCreate(
+                route_type="proxy",
+                hostname="headscale.example.com",
+                path="/",
+                dest_host="127.0.0.1",
+                dest_port=9091,
+                ssl_enabled=True,
+            )
+
+        self.assertEqual(route.hostname, "headscale.example.com")
+
+    def test_accepts_sibling_host_under_route_domain(self):
+        with (
+            patch.object(main, "DMZ_DOMAIN", "www.example.com"),
+            patch.object(main, "DMZ_ROUTE_DOMAIN", "example.com"),
             patch.object(main, "DMZ_CADDY_PORT", 443),
         ):
             route = main.SiteRouteCreate(
@@ -59,8 +95,11 @@ class SiteRouteValidationTests(unittest.TestCase):
         self.assertEqual(route.hostname, "headscale.example.com")
 
     def test_rejects_foreign_domain_and_reserved_main_path(self):
-        with patch.object(main, "DMZ_DOMAIN", "example.com"):
-            with self.assertRaisesRegex(ValueError, "main domain"):
+        with (
+            patch.object(main, "DMZ_DOMAIN", "www.example.com"),
+            patch.object(main, "DMZ_ROUTE_DOMAIN", "example.com"),
+        ):
+            with self.assertRaisesRegex(ValueError, "route domain"):
                 main.SiteRouteCreate(
                     route_type="proxy",
                     hostname="foreign.test",
@@ -71,7 +110,7 @@ class SiteRouteValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "reserved"):
                 main.SiteRouteCreate(
                     route_type="static",
-                    hostname="example.com",
+                    hostname="www.example.com",
                     path="/admin",
                 )
 

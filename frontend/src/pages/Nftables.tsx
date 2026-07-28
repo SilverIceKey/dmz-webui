@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { nftables } from '../utils/api';
 import type { LocalPortRule, NfRule } from '../types';
 import NavbarBrand from '../components/NavbarBrand';
+import { formatApiError } from '../utils/errors';
 
 function Navbar() {
   const logout = () => {
@@ -269,8 +270,8 @@ export default function NftablesPage() {
       setModalOpen(false);
       setEditingRule(null);
       fetchRules();
-    } catch (e: any) {
-      alert('保存失败: ' + (e.response?.data?.detail || e.message));
+    } catch (e: unknown) {
+      alert('保存失败: ' + formatApiError(e));
     }
   };
 
@@ -292,8 +293,8 @@ export default function NftablesPage() {
         await nftables.removeOpenPort(rule.protocol, rule.port);
       }
       fetchRules();
-    } catch (e: any) {
-      alert('删除失败: ' + (e.response?.data?.detail || e.message));
+    } catch (e: unknown) {
+      alert('删除失败: ' + formatApiError(e));
     }
   };
 
@@ -313,8 +314,8 @@ export default function NftablesPage() {
     try {
       await nftables.updateCnIpset();
       alert('大陆 IP 列表更新成功');
-    } catch (e: any) {
-      alert('更新失败: ' + (e.response?.data?.detail || e.message));
+    } catch (e: unknown) {
+      alert('更新失败: ' + formatApiError(e));
     } finally {
       setUpdatingCn(false);
     }

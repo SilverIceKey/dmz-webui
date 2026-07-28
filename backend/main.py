@@ -58,9 +58,35 @@ SECRET_KEY = os.environ.get("DMZ_SECRET_KEY", "dmz-change-me-in-production")
 if SECRET_KEY == "dmz-change-me-in-production":
     print("[dmz-webui] WARNING: using default SECRET_KEY, set DMZ_SECRET_KEY env var in production")
 ALGORITHM = "HS256"
+HOSTNAME_PATTERN = re.compile(
+    r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*"
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+)
 
 # Public domain / host used by Caddy reverse proxy generation
 DMZ_DOMAIN = os.environ.get("DMZ_DOMAIN", "example.com")
+
+
+def _default_route_domain(domain: str) -> str:
+    normalized = domain.strip().lower().rstrip(".")
+    if normalized.startswith("www.") and "." in normalized[4:]:
+        return normalized[4:]
+    return normalized
+
+
+def _configured_route_domain() -> str:
+    fallback = _default_route_domain(DMZ_DOMAIN)
+    configured = os.environ.get("DMZ_ROUTE_DOMAIN", "").strip().lower().rstrip(".")
+    if (
+        configured
+        and "." in configured
+        and HOSTNAME_PATTERN.fullmatch(configured)
+    ):
+        return configured
+    return fallback
+
+
+DMZ_ROUTE_DOMAIN = _configured_route_domain()
 DMZ_WEBUI_HOST = os.environ.get("DMZ_WEBUI_HOST", "127.0.0.1")
 DMZ_CADDY_PORT = int(os.environ.get("DMZ_CADDY_PORT", "8443"))
 DMZ_CADDY_TLS_MODE = os.environ.get("DMZ_CADDY_TLS_MODE", "manual")
@@ -238,15 +264,11 @@ class SiteRouteCreate(BaseModel):
     @classmethod
     def validate_hostname(cls, value: str) -> str:
         value = value.strip().lower().rstrip(".")
-        if not re.fullmatch(
-            r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*"
-            r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
-            value,
-        ):
+        if not HOSTNAME_PATTERN.fullmatch(value):
             raise ValueError("invalid hostname")
-        domain = DMZ_DOMAIN.lower().rstrip(".")
+        domain = DMZ_ROUTE_DOMAIN.lower().rstrip(".")
         if value != domain and not value.endswith(f".{domain}"):
-            raise ValueError("hostname must use the configured main domain")
+            raise ValueError("hostname must use the configured route domain")
         return value
 
     @field_validator("path")
@@ -337,6 +359,7 @@ class PublicConfig(BaseModel):
     icp_number: str = ""
     site_title: str = "DMZ WebUI"
     tab_title: str = "DMZ WebUI"
+    route_domain: str = ""
 
 # ----------------- Settings -----------------
 
@@ -438,6 +461,7 @@ def get_public_config():
         "icp_number": DMZ_ICP_NUMBER,
         "site_title": DMZ_SITE_TITLE,
         "tab_title": DMZ_TAB_TITLE,
+        "route_domain": DMZ_ROUTE_DOMAIN,
     }
 
 @app.get("/api/settings")

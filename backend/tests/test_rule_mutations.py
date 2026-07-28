@@ -153,6 +153,7 @@ class EndpointMutationTests(unittest.TestCase):
             patch.object(main, "DMZ_ICP_NUMBER", "浙ICP备12345678号"),
             patch.object(main, "DMZ_SITE_TITLE", "银钥管理"),
             patch.object(main, "DMZ_TAB_TITLE", "银钥控制台"),
+            patch.object(main, "DMZ_ROUTE_DOMAIN", "silvericekey.top"),
         ):
             result = main.get_public_config()
 
@@ -160,6 +161,7 @@ class EndpointMutationTests(unittest.TestCase):
             "icp_number": "浙ICP备12345678号",
             "site_title": "银钥管理",
             "tab_title": "银钥控制台",
+            "route_domain": "silvericekey.top",
         })
         route = next(route for route in main.app.routes if route.path == "/api/public-config")
         self.assertEqual(route.dependant.dependencies, [])

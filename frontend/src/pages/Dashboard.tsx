@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { services, ports, system } from '../utils/api';
 import type { ServiceStatus, PortProcess, SystemMetrics } from '../types';
 import NavbarBrand from '../components/NavbarBrand';
+import { formatApiError } from '../utils/errors';
 import {
   LineChart,
   Line,
@@ -198,8 +199,8 @@ export default function Dashboard() {
       await services.apply(svc);
       alert('重载成功');
       fetchData();
-    } catch (e: any) {
-      alert('重载失败: ' + (e.response?.data?.detail || e.message));
+    } catch (e: unknown) {
+      alert('重载失败: ' + formatApiError(e));
     }
   };
 

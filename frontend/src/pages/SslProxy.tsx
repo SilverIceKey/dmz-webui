@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { siteRoutes, sslProxy } from '../utils/api';
 import type { SiteRoute, SslProxyRule } from '../types';
 import NavbarBrand from '../components/NavbarBrand';
+import { usePublicConfig } from '../context/PublicConfigContext';
+import { formatApiError } from '../utils/errors';
 
 function Navbar() {
   const logout = () => {
@@ -181,6 +183,7 @@ function SiteRouteModal({
 }) {
   const [form, setForm] = useState<SiteRouteFormData>(emptySiteRouteForm);
   const [saving, setSaving] = useState(false);
+  const { route_domain: routeDomain } = usePublicConfig();
 
   useEffect(() => {
     if (initial) {
@@ -240,6 +243,9 @@ function SiteRouteModal({
               placeholder="headscale.example.com"
               required
             />
+            {routeDomain && (
+              <small>允许 {routeDomain} 及其子域名</small>
+            )}
           </div>
           <div className="form-group">
             <label>访问路径</label>
@@ -367,8 +373,8 @@ export default function SslProxyPage() {
       setModalOpen(false);
       setEditingRule(null);
       fetchRules();
-    } catch (e: any) {
-      alert('保存失败: ' + (e.response?.data?.detail || e.message));
+    } catch (e: unknown) {
+      alert('保存失败: ' + formatApiError(e));
     }
   };
 
@@ -378,8 +384,8 @@ export default function SslProxyPage() {
     try {
       await sslProxy.remove(rule.id);
       fetchRules();
-    } catch (e: any) {
-      alert('删除失败: ' + (e.response?.data?.detail || e.message));
+    } catch (e: unknown) {
+      alert('删除失败: ' + formatApiError(e));
     }
   };
 
@@ -415,8 +421,8 @@ export default function SslProxyPage() {
       setSiteModalOpen(false);
       setEditingSiteRoute(null);
       fetchRules();
-    } catch (error: any) {
-      alert('保存失败: ' + (error.response?.data?.detail || error.message));
+    } catch (error: unknown) {
+      alert('保存失败: ' + formatApiError(error));
     }
   };
 
@@ -425,8 +431,8 @@ export default function SslProxyPage() {
     try {
       await siteRoutes.remove(rule.id);
       fetchRules();
-    } catch (error: any) {
-      alert('删除失败: ' + (error.response?.data?.detail || error.message));
+    } catch (error: unknown) {
+      alert('删除失败: ' + formatApiError(error));
     }
   };
 

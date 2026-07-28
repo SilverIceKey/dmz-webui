@@ -11,6 +11,15 @@ validate_domain() {
     [[ -n "$d" ]] && [[ "$d" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$ ]]
 }
 
+default_route_domain() {
+    local domain="$1"
+    if [[ "$domain" == www.* && "${domain#www.}" == *.* ]]; then
+        printf '%s' "${domain#www.}"
+    else
+        printf '%s' "$domain"
+    fi
+}
+
 validate_icp_number() {
     local value="$1"
     [[ -z "$value" ]] || [[ "$value" =~ ^[京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼]ICP备[0-9]+号(-[0-9]+)?$ ]]
@@ -83,6 +92,7 @@ save_config() {
 # DMZ WebUI 部署配置（由 scripts/deploy.sh / scripts/update.sh 生成）
 # 时间戳: $(date '+%Y-%m-%d %H:%M:%S')
 DMZ_DOMAIN='${DMZ_DOMAIN}'
+DMZ_ROUTE_DOMAIN='${DMZ_ROUTE_DOMAIN:-$(default_route_domain "$DMZ_DOMAIN")}'
 DMZ_WEBUI_HOST='${DMZ_WEBUI_HOST:-127.0.0.1}'
 CADDY_MODE='${CADDY_MODE:-non443}'
 DMZ_CADDY_PORT='${DMZ_CADDY_PORT:-8443}'
@@ -111,6 +121,18 @@ prompt_public_caddy_config() {
         fi
         warn "域名格式不正确，请重新输入"
         domain_default=""
+    done
+
+    local route_domain_default route_domain_input
+    route_domain_default="${DMZ_ROUTE_DOMAIN:-$(default_route_domain "$DMZ_DOMAIN")}"
+    while true; do
+        read -rp "请输入站点路由基础域名 [${route_domain_default}]: " route_domain_input
+        DMZ_ROUTE_DOMAIN="${route_domain_input:-$route_domain_default}"
+        if validate_domain "$DMZ_ROUTE_DOMAIN"; then
+            break
+        fi
+        warn "站点路由基础域名格式不正确，请重新输入"
+        route_domain_default="$(default_route_domain "$DMZ_DOMAIN")"
     done
 
     echo ""
@@ -213,6 +235,7 @@ confirm_config_group() {
 
 prompt_config() {
     if load_config; then
+        DMZ_ROUTE_DOMAIN="${DMZ_ROUTE_DOMAIN:-$(default_route_domain "$DMZ_DOMAIN")}"
         info "检测到已有部署配置: $(mask_domain "$DMZ_DOMAIN")"
 
         if confirm_config_group "是否修改公网与 Caddy 配置？"; then
@@ -389,6 +412,7 @@ install_service_override() {
     cat > "${dropin_dir}/override.conf" <<EOF
 [Service]
 Environment="DMZ_DOMAIN=${DMZ_DOMAIN}"
+Environment="DMZ_ROUTE_DOMAIN=${DMZ_ROUTE_DOMAIN:-$(default_route_domain "$DMZ_DOMAIN")}"
 Environment="DMZ_WEBUI_HOST=${DMZ_WEBUI_HOST:-127.0.0.1}"
 Environment="DMZ_CADDY_PORT=${DMZ_CADDY_PORT:-8443}"
 Environment="DMZ_CADDY_TLS_MODE=${DMZ_CADDY_TLS_MODE:-manual}"

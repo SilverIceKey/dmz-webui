@@ -12,6 +12,7 @@ const defaultConfig: PublicConfig = {
   icp_number: '',
   site_title: 'DMZ WebUI',
   tab_title: 'DMZ WebUI',
+  route_domain: '',
 };
 
 const PublicConfigContext = createContext<PublicConfig>(defaultConfig);
@@ -26,6 +27,7 @@ export function PublicConfigProvider({ children }: { children: ReactNode }) {
           icp_number: response.data.icp_number || '',
           site_title: response.data.site_title || defaultConfig.site_title,
           tab_title: response.data.tab_title || defaultConfig.tab_title,
+          route_domain: response.data.route_domain || '',
         });
       })
       .catch(() => setConfig(defaultConfig));

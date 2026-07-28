@@ -2,6 +2,7 @@ export interface PublicConfig {
   icp_number: string;
   site_title: string;
   tab_title: string;
+  route_domain: string;
 }
 
 export interface NfRule {

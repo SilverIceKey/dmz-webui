@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { auth } from '../utils/api';
 import { usePublicConfig } from '../context/PublicConfigContext';
+import { formatApiError } from '../utils/errors';
 
 export default function Login() {
   const [username, setUsername] = useState('');
@@ -20,8 +21,8 @@ export default function Login() {
       const res = await auth.login(username, password);
       localStorage.setItem('token', res.data.token);
       window.location.href = '/admin';
-    } catch (err: any) {
-      setError(err.response?.data?.detail || '登录失败');
+    } catch (err: unknown) {
+      setError(formatApiError(err, '登录失败'));
     } finally {
       setLoading(false);
     }

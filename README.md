@@ -72,7 +72,8 @@ sudo ./scripts/deploy.sh
 Docker、iptables-nft 及其他程序管理的表和链不属于 DMZ WebUI 的修改范围。
 
 > 如果系统已安装 `ufw`，脚本会自动备份并禁用 `ufw`，后续防火墙统一由 nftables 管理。
-> 你也可以提前设置环境变量 `DMZ_DOMAIN`、`DMZ_WEBUI_HOST`、
+> 你也可以提前设置环境变量 `DMZ_DOMAIN`、`DMZ_ROUTE_DOMAIN`、
+> `DMZ_WEBUI_HOST`、
 > `DMZ_SITE_TITLE`、`DMZ_TAB_TITLE`、`DMZ_ICP_NUMBER`、`CF_API_KEY`、
 > `CF_EMAIL`，脚本会将其作为默认值。
 > `DMZ_ICP_NUMBER` 留空时登录页不显示备案链接；配置会保存在
@@ -165,8 +166,20 @@ sudo systemctl start dmz-webui
 - 主域名或子域名静态文件，例如提供
   `https://static.example.com/derper.json`。
 
-站点路由的域名必须是部署主域名或其子域名。主域名的 `/`、`/admin` 和
-`/assets` 保留给 WebUI；同一域名下不允许路径重复或父子路径重叠。
+`DMZ_DOMAIN` 表示 WebUI 主站地址，`DMZ_ROUTE_DOMAIN` 表示允许创建站点
+路由的基础域名。例如：
+
+```text
+DMZ_DOMAIN=www.example.com
+DMZ_ROUTE_DOMAIN=example.com
+```
+
+此时允许 `example.com` 及其子域名，包括 `www.example.com` 和
+`headscale.example.com`。历史配置没有 `DMZ_ROUTE_DOMAIN` 时，如果主站以
+`www.` 开头会默认去掉该前缀，否则沿用主站域名。
+
+主站的 `/`、`/admin` 和 `/assets` 保留给 WebUI；同一域名下不允许路径重复
+或父子路径重叠。
 
 二级域名启用 SSL 时，程序生成 Caddy 自动 HTTPS 站点配置。Caddy 会自动
 申请并续签证书，无需为每个二级域名单独运行 certbot。使用前必须满足：
