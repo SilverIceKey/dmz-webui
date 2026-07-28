@@ -6,6 +6,7 @@ DMZ 网络管控 Web 管理界面。基于 React + TypeScript 前端、Python Fa
 
 - **防火墙规则管理**：分别管理 nftables 端口转发和本机端口开放规则
 - **站点路由管理**：按主域名/子域名和路径管理 Caddy 反向代理及静态文件
+- **TCP/SNI 透传**：在共享 443 上按 TLS SNI 透传 DERP 等非 HTTP 协议
 - **端口进程查看**：实时查看系统监听端口与占用进程
 - **服务状态监控**：nftables / caddy 运行状态与一键重载
 - **Linux 系统账户登录**：通过 PAM 使用系统用户认证
@@ -201,6 +202,25 @@ DMZ_ROUTE_DOMAIN=example.com
 `derper.json`。配置子域名根路径 `/` 时，可按相对 URL 访问目录中的文件，
 但不提供目录列表。文件和子目录需允许 `caddy` 服务用户读取。删除规则只
 撤销访问路由，不删除已有文件。
+
+## TCP/SNI 透传
+
+“SSL 代理”页面提供独立的“TCP/SNI 透传”，用于 DERP 等不能经过普通 HTTP
+`reverse_proxy` 的 TLS 服务。该类型在 Caddy 处理 HTTP 之前读取 ClientHello
+的 SNI，命中后原样转发 TCP；其他 443 流量继续进入原有 WebUI、Headscale
+和静态文件站点。
+
+- 仅支持标准 443 模式。
+- SNI 域名不能与 WebUI 主域名或 HTTP 站点路由重复。
+- Caddy 不终止透传连接的 TLS，也不为目标服务申请证书。
+- 目标服务必须自行提供与 SNI 域名匹配的可信证书。
+- UDP 不经过 Caddy；DERP STUN 3478 需要单独发布和开放。
+
+标准 443 部署会安装并核验固定的 Caddy 2.11.4 与
+`caddy-l4` 0.1.0 自定义构建。系统 Caddy 和自定义 Caddy 通过
+`update-alternatives` 隔离，安装或更新失败时恢复原二进制与 Caddyfile。
+具体配置和验收参见
+`docs/guides/GUIDE-20260728-tcp-sni-passthrough-v1.md`。
 
 ## 管理命令
 

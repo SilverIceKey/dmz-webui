@@ -50,6 +50,14 @@ export const siteRoutes = {
   remove: (id: number) => api.delete(`/caddy/site-routes/${id}`),
 };
 
+export const sniRoutes = {
+  list: () => api.get('/caddy/sni-routes'),
+  create: (data: any) => api.post('/caddy/sni-routes', data),
+  update: (id: number, data: any) =>
+    api.put(`/caddy/sni-routes/${id}`, data),
+  remove: (id: number) => api.delete(`/caddy/sni-routes/${id}`),
+};
+
 export const nftables = {
   list: () => api.get('/nftables/rules'),
   create: (data: any) => api.post('/nftables/rules', data),

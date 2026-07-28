@@ -26,13 +26,19 @@ from firewall import (
     upsert_named_block_in_parent,
 )
 from caddy_routes import (
+    append_caddy_sni_listener,
     append_caddy_site_route,
     ensure_site_static_directory,
     site_static_directory,
+    validate_sni_route_conflicts,
     validate_site_route_conflicts,
 )
 
 app = FastAPI(title="DMZ WebUI")
+
+
+class CaddyCapabilityError(RuntimeError):
+    pass
 
 # Metrics history persistence
 # 生产环境默认 /var/lib/dmz-webui；开发测试可通过 DMZ_DATA_DIR 覆盖
@@ -115,6 +121,7 @@ CADDYFILE = "/etc/caddy/Caddyfile"
 CONFIG_PATH = "/etc/dmz-webui/config.json"
 SSL_PROXY_RULES_PATH = "/etc/dmz-webui/ssl_proxy_rules.json"
 SITE_ROUTES_PATH = "/etc/dmz-webui/site_routes.json"
+SNI_ROUTES_PATH = "/etc/dmz-webui/sni_routes.json"
 SITE_STATIC_ROOT = "/var/lib/dmz-webui/caddy-static"
 
 # ----------------- Models -----------------
@@ -328,6 +335,62 @@ class SiteRoute(SiteRouteCreate):
     id: int
     static_directory: Optional[str] = None
 
+
+class SniRouteCreate(BaseModel):
+    hostname: str
+    dest_host: str
+    dest_port: int
+    comment: Optional[str] = ""
+
+    @field_validator("hostname")
+    @classmethod
+    def validate_hostname(cls, value: str) -> str:
+        value = value.strip().lower().rstrip(".")
+        if not HOSTNAME_PATTERN.fullmatch(value):
+            raise ValueError("invalid hostname")
+        domain = DMZ_ROUTE_DOMAIN.lower().rstrip(".")
+        if value != domain and not value.endswith(f".{domain}"):
+            raise ValueError("hostname must use the configured route domain")
+        if value == DMZ_DOMAIN.lower().rstrip("."):
+            raise ValueError("hostname is reserved by the WebUI")
+        return value
+
+    @field_validator("dest_host")
+    @classmethod
+    def validate_dest_host(cls, value: str) -> str:
+        value = value.strip().lower().rstrip(".")
+        if not HOSTNAME_PATTERN.fullmatch(value):
+            raise ValueError("invalid SNI destination host")
+        return value
+
+    @field_validator("dest_port")
+    @classmethod
+    def validate_dest_port(cls, value: int) -> int:
+        if not 1 <= value <= 65535:
+            raise ValueError(
+                "SNI destination port must be between 1 and 65535"
+            )
+        return value
+
+    @field_validator("comment")
+    @classmethod
+    def validate_comment(cls, value: Optional[str]) -> Optional[str]:
+        if value and ("\n" in value or "\r" in value):
+            raise ValueError("comment must be a single line")
+        return value
+
+    @model_validator(mode="after")
+    def validate_standard_port_mode(self):
+        if DMZ_CADDY_PORT != 443 or DMZ_CADDY_TLS_MODE != "auto":
+            raise ValueError(
+                "TCP/SNI passthrough requires standard port 443 mode"
+            )
+        return self
+
+
+class SniRoute(SniRouteCreate):
+    id: int
+
 class ServiceStatus(BaseModel):
     name: str
     active: bool
@@ -419,6 +482,26 @@ def _next_site_route_id(rules: List[dict]) -> int:
     return max((rule.get("id", 0) for rule in rules), default=0) + 1
 
 
+def _load_sni_routes() -> List[dict]:
+    if not os.path.exists(SNI_ROUTES_PATH):
+        return []
+    try:
+        with open(SNI_ROUTES_PATH, "r") as file:
+            data = json.load(file)
+        return data if isinstance(data, list) else []
+    except Exception as error:
+        print(f"[dmz-webui] Failed to load SNI routes: {error}")
+        return []
+
+
+def _save_sni_routes(rules: List[dict]):
+    _atomic_write_text(SNI_ROUTES_PATH, json.dumps(rules, indent=2))
+
+
+def _next_sni_route_id(rules: List[dict]) -> int:
+    return max((rule.get("id", 0) for rule in rules), default=0) + 1
+
+
 def _site_static_directory(rule_id: int) -> str:
     return site_static_directory(SITE_STATIC_ROOT, rule_id)
 
@@ -429,6 +512,16 @@ def _ensure_site_static_directory(rule_id: int) -> str:
 
 def _validate_site_route_conflicts(rules: List[dict]) -> None:
     validate_site_route_conflicts(rules)
+
+
+def _validate_sni_route_conflicts(
+    sni_routes: List[dict],
+    site_routes: Optional[List[dict]] = None,
+) -> None:
+    validate_sni_route_conflicts(
+        sni_routes,
+        site_routes if site_routes is not None else _load_site_routes(),
+    )
 
 # ----------------- Auth -----------------
 
@@ -1091,6 +1184,7 @@ def create_site_route(
     candidate = [*rules, new_rule]
     try:
         _validate_site_route_conflicts(candidate)
+        _validate_sni_route_conflicts(_load_sni_routes(), candidate)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     if new_rule["route_type"] == "static":
@@ -1134,6 +1228,7 @@ def edit_site_route(
         )
     try:
         _validate_site_route_conflicts(candidate)
+        _validate_sni_route_conflicts(_load_sni_routes(), candidate)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     if rule.route_type == "static":
@@ -1171,6 +1266,81 @@ def delete_site_route(rule_id: int, _: str = Depends(verify_token)):
     return {"ok": True}
 
 
+# ----------------- Caddy TCP/SNI Routes -----------------
+
+@app.get("/api/caddy/sni-routes", response_model=List[SniRoute])
+def get_sni_routes(_: str = Depends(verify_token)):
+    return _load_sni_routes()
+
+
+@app.post("/api/caddy/sni-routes")
+def create_sni_route(
+    rule: SniRouteCreate, _: str = Depends(verify_token)
+):
+    rules = _load_sni_routes()
+    new_rule = {"id": _next_sni_route_id(rules), **rule.model_dump()}
+    candidate = [*rules, new_rule]
+    try:
+        _validate_sni_route_conflicts(candidate)
+        _apply_sni_routes(candidate)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except CaddyCapabilityError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail="SNI route apply failed; previous configuration restored",
+        ) from error
+    return {"ok": True, "id": new_rule["id"]}
+
+
+@app.put("/api/caddy/sni-routes/{rule_id}")
+def edit_sni_route(
+    rule_id: int,
+    rule: SniRouteCreate,
+    _: str = Depends(verify_token),
+):
+    rules = _load_sni_routes()
+    index = next(
+        (item for item, current in enumerate(rules) if current.get("id") == rule_id),
+        -1,
+    )
+    if index == -1:
+        raise HTTPException(status_code=404, detail="SNI route not found")
+    candidate = list(rules)
+    candidate[index] = {"id": rule_id, **rule.model_dump()}
+    try:
+        _validate_sni_route_conflicts(candidate)
+        _apply_sni_routes(candidate)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except CaddyCapabilityError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail="SNI route apply failed; previous configuration restored",
+        ) from error
+    return {"ok": True}
+
+
+@app.delete("/api/caddy/sni-routes/{rule_id}")
+def delete_sni_route(rule_id: int, _: str = Depends(verify_token)):
+    rules = _load_sni_routes()
+    candidate = [rule for rule in rules if rule.get("id") != rule_id]
+    if len(candidate) == len(rules):
+        raise HTTPException(status_code=404, detail="SNI route not found")
+    try:
+        _apply_sni_routes(candidate)
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail="SNI route apply failed; previous configuration restored",
+        ) from error
+    return {"ok": True}
+
+
 # ----------------- Caddy -----------------
 
 def _read_caddy() -> str:
@@ -1195,11 +1365,25 @@ def _append_caddy_site_route(lines: List[str], rule: dict) -> None:
 def _build_caddyfile(
     rules: Optional[List[dict]] = None,
     site_routes: Optional[List[dict]] = None,
+    sni_routes: Optional[List[dict]] = None,
 ) -> str:
     settings = load_settings()
     domain = DMZ_DOMAIN
     configured_site_routes = (
         site_routes if site_routes is not None else _load_site_routes()
+    )
+    configured_sni_routes = (
+        sni_routes if sni_routes is not None else _load_sni_routes()
+    )
+    if configured_sni_routes and (
+        DMZ_CADDY_PORT != 443 or DMZ_CADDY_TLS_MODE != "auto"
+    ):
+        raise ValueError(
+            "TCP/SNI passthrough requires standard port 443 mode"
+        )
+    _validate_sni_route_conflicts(
+        configured_sni_routes,
+        configured_site_routes,
     )
     routes_by_hostname: dict[str, List[dict]] = {}
     for rule in configured_site_routes:
@@ -1219,11 +1403,16 @@ def _build_caddyfile(
         tls_line = "auto_https off"
 
     lines = []
+    global_options = []
     if (
         DMZ_CADDY_TLS_MODE == "auto"
         and re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", DMZ_ACME_EMAIL)
     ):
-        lines.extend(["{", f"    email {DMZ_ACME_EMAIL}", "}", ""])
+        global_options.append(f"    email {DMZ_ACME_EMAIL}")
+    if configured_sni_routes:
+        append_caddy_sni_listener(global_options, configured_sni_routes)
+    if global_options:
+        lines.extend(["{", *global_options, "}", ""])
     lines.append(f"{domain}:{DMZ_CADDY_PORT} {{")
     lines.append("    encode gzip")
     if tls_line:
@@ -1297,6 +1486,67 @@ def _apply_site_routes(rules: List[dict]):
                     "[dmz-webui] site route Caddy rollback failed: "
                     f"{rollback_error}"
                 )
+        raise
+
+
+def _check_caddy_layer4_modules() -> None:
+    required = {
+        "caddy.listeners.layer4",
+        "layer4.handlers.proxy",
+        "layer4.matchers.tls",
+    }
+    try:
+        result = subprocess.run(
+            ["caddy", "list-modules"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise CaddyCapabilityError(
+            "Unable to inspect Caddy Layer 4 modules"
+        ) from error
+    installed = set(result.stdout.splitlines())
+    missing = sorted(required - installed)
+    if missing:
+        raise CaddyCapabilityError(
+            "Caddy Layer 4 modules are not installed: "
+            + ", ".join(missing)
+        )
+
+
+def _apply_sni_routes(rules: List[dict]):
+    old_rules = _load_sni_routes()
+    old_caddy = _read_caddy()
+    _validate_sni_route_conflicts(rules)
+    if rules:
+        _check_caddy_layer4_modules()
+    new_caddy = _build_caddyfile(sni_routes=rules)
+    _validate_caddy(new_caddy)
+
+    caddy_changed = False
+    try:
+        _write_caddy(new_caddy)
+        caddy_changed = True
+        _reload_caddy()
+        _save_sni_routes(rules)
+    except Exception:
+        rollback_errors = []
+        if caddy_changed:
+            try:
+                _write_caddy(old_caddy)
+                _reload_caddy()
+            except Exception as rollback_error:
+                rollback_errors.append(f"caddy: {rollback_error}")
+        try:
+            _save_sni_routes(old_rules)
+        except Exception as rollback_error:
+            rollback_errors.append(f"SNI routes: {rollback_error}")
+        if rollback_errors:
+            print(
+                "[dmz-webui] SNI route rollback errors: "
+                + "; ".join(rollback_errors)
+            )
         raise
 
 

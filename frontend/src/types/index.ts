@@ -61,6 +61,14 @@ export interface SiteRoute {
   comment?: string;
 }
 
+export interface SniRoute {
+  id: number;
+  hostname: string;
+  dest_host: string;
+  dest_port: number;
+  comment?: string;
+}
+
 export interface SystemMetrics {
   cpu_percent: number;
   memory: {

@@ -75,7 +75,7 @@ step "1/7 安装系统依赖"
 # 检查必要命令/模块是否存在
 MISSING_PKGS=()
 
-for cmd in python3 npm nft caddy systemctl; do
+for cmd in python3 npm nft caddy curl systemctl; do
     if ! command -v "$cmd" &>/dev/null; then
         warn "命令缺失: $cmd"
         case "$cmd" in
@@ -83,6 +83,7 @@ for cmd in python3 npm nft caddy systemctl; do
             npm) MISSING_PKGS+=(nodejs npm) ;;
             nft) MISSING_PKGS+=(nftables) ;;
             caddy) MISSING_PKGS+=(caddy) ;;
+            curl) MISSING_PKGS+=(curl) ;;
             systemctl) warn "systemctl 不存在，可能是容器环境" ;;
         esac
     else
@@ -284,6 +285,12 @@ if [ ! -f "$SITE_ROUTES_FILE" ]; then
     chmod 600 "$SITE_ROUTES_FILE"
     info "站点路由规则文件已初始化: $SITE_ROUTES_FILE"
 fi
+SNI_ROUTES_FILE="/etc/dmz-webui/sni_routes.json"
+if [ ! -f "$SNI_ROUTES_FILE" ]; then
+    echo '[]' > "$SNI_ROUTES_FILE"
+    chmod 600 "$SNI_ROUTES_FILE"
+    info "TCP/SNI 透传规则文件已初始化: $SNI_ROUTES_FILE"
+fi
 run_cmd "创建 Caddy 静态站点目录" \
     mkdir -p /var/lib/dmz-webui/caddy-static
 chmod 755 /var/lib/dmz-webui /var/lib/dmz-webui/caddy-static
@@ -415,8 +422,22 @@ fi
 # ----------------- Step 8: SSL 证书与 Caddy 配置 -----------------
 step "8/9 SSL 证书与 Caddy 配置"
 
-ensure_certificate
-generate_caddyfile
+prepare_caddy_rollback
+if ! ensure_caddy_layer4; then
+    error "Caddy Layer 4 安装或校验失败"
+    rollback_caddy_changes
+    exit 1
+fi
+if ! ensure_certificate; then
+    error "证书准备失败"
+    rollback_caddy_changes
+    exit 1
+fi
+if ! generate_caddyfile; then
+    error "Caddyfile 生成或校验失败"
+    rollback_caddy_changes
+    exit 1
+fi
 
 # 修复证书权限（如适用）
 CERT_DIR="/etc/letsencrypt/live/${DMZ_DOMAIN}"
@@ -437,7 +458,9 @@ if run_cmd "重启 Caddy" systemctl restart caddy; then
         warn "Caddy 启动后状态异常"
     fi
 else
-    warn "Caddy 重启失败"
+    error "Caddy 重启失败，恢复部署前配置"
+    rollback_caddy_changes
+    exit 1
 fi
 
 # 根据 Caddy 模式配置 nftables 基础规则（替换占位符、放行对应端口）

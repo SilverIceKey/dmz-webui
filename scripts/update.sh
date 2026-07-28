@@ -33,6 +33,8 @@ rollback() {
     error "更新失败，执行回滚..."
     error "========================================"
 
+    rollback_caddy_changes
+
     if [ -n "$ROLLBACK_DIR" ] && [ -d "$ROLLBACK_DIR" ]; then
         info "回滚目录: $ROLLBACK_DIR"
 
@@ -267,6 +269,12 @@ run_cmd "创建 static 目录" mkdir -p "$INSTALL_DIR/backend/static"
 run_cmd "创建 Caddy 静态站点目录" \
     mkdir -p /var/lib/dmz-webui/caddy-static
 chmod 755 /var/lib/dmz-webui /var/lib/dmz-webui/caddy-static
+SNI_ROUTES_FILE="/etc/dmz-webui/sni_routes.json"
+if [ ! -f "$SNI_ROUTES_FILE" ]; then
+    echo '[]' > "$SNI_ROUTES_FILE"
+    chmod 600 "$SNI_ROUTES_FILE"
+    info "TCP/SNI 透传规则文件已初始化: $SNI_ROUTES_FILE"
+fi
 if run_cmd "复制前端产物" cp -r "$INSTALL_DIR/frontend/dist/"* "$INSTALL_DIR/backend/static/"; then
     info "静态文件配置完成"
 else
@@ -338,8 +346,19 @@ fi
 # Caddy 证书、Caddyfile 与服务
 info "检查 Caddy 及证书状态..."
 
-ensure_certificate
-generate_caddyfile
+prepare_caddy_rollback
+if ! ensure_caddy_layer4; then
+    error "Caddy Layer 4 安装或校验失败"
+    rollback
+fi
+if ! ensure_certificate; then
+    error "证书准备失败"
+    rollback
+fi
+if ! generate_caddyfile; then
+    error "Caddyfile 生成或校验失败"
+    rollback
+fi
 
 CERT_DIR="/etc/letsencrypt/live/${DMZ_DOMAIN}"
 if [ -f "${CERT_DIR}/fullchain.pem" ]; then
@@ -358,7 +377,8 @@ if run_cmd "重启 Caddy" systemctl restart caddy; then
         warn "Caddy 启动后状态异常"
     fi
 else
-    warn "Caddy 重启失败"
+    error "Caddy 重启失败"
+    rollback
 fi
 
 # 根据 Caddy 模式配置 nftables 基础规则

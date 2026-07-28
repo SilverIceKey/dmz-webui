@@ -41,6 +41,48 @@ def validate_site_route_conflicts(rules: List[dict]) -> None:
                 )
 
 
+def validate_sni_route_conflicts(
+    sni_routes: List[dict],
+    site_routes: List[dict],
+) -> None:
+    seen_hostnames: set[str] = set()
+    site_hostnames = {route["hostname"] for route in site_routes}
+    for route in sni_routes:
+        hostname = route["hostname"]
+        if hostname in seen_hostnames:
+            raise ValueError(f"SNI hostname {hostname} is already configured")
+        if hostname in site_hostnames:
+            raise ValueError(
+                f"hostname {hostname} is already used by an HTTP site route"
+            )
+        seen_hostnames.add(hostname)
+
+
+def append_caddy_sni_listener(
+    lines: List[str],
+    rules: List[dict],
+) -> None:
+    lines.append("    servers :443 {")
+    lines.append("        listener_wrappers {")
+    lines.append("            layer4 {")
+    for rule in rules:
+        route_id = rule["id"]
+        lines.append(
+            f"                @sni_route_{route_id} tls sni {rule['hostname']}"
+        )
+        lines.append(f"                route @sni_route_{route_id} {{")
+        lines.append(
+            "                    proxy "
+            f"tcp/{rule['dest_host']}:{rule['dest_port']}"
+        )
+        lines.append("                }")
+        lines.append("")
+    lines.append("            }")
+    lines.append("            tls")
+    lines.append("        }")
+    lines.append("    }")
+
+
 def append_caddy_site_route(
     lines: List[str],
     rule: dict,

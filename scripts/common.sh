@@ -3,6 +3,15 @@
 # 由 deploy.sh / update.sh source 使用
 
 CONFIG_FILE="/etc/dmz-webui/install.conf"
+CADDY_CORE_VERSION="v2.11.4"
+CADDY_L4_VERSION="v0.1.0"
+CADDY_L4_PACKAGE="github.com/mholt/caddy-l4"
+CADDY_CUSTOM_CHANGED=0
+CADDY_CUSTOM_HAD_PREVIOUS=0
+CADDY_CUSTOM_PREVIOUS=""
+CADDYFILE_ROLLBACK_PREPARED=0
+CADDYFILE_HAD_PREVIOUS=0
+CADDYFILE_PREVIOUS=""
 
 # -------------- 配置收集与持久化 --------------
 
@@ -368,6 +377,198 @@ CFEOF
 
 # -------------- Caddyfile 生成 --------------
 
+caddy_has_required_layer4_modules() {
+    local caddy_bin="${1:-caddy}"
+    local modules
+    if ! modules=$("$caddy_bin" list-modules 2>/dev/null); then
+        return 1
+    fi
+    local required
+    for required in \
+        caddy.listeners.layer4 \
+        layer4.handlers.proxy \
+        layer4.matchers.tls; do
+        if ! grep -Fxq "$required" <<<"$modules"; then
+            return 1
+        fi
+    done
+}
+
+caddy_is_expected_custom_build() {
+    local caddy_bin="${1:-caddy}"
+    local version build_info
+    version=$("$caddy_bin" version 2>/dev/null) || return 1
+    [[ "$version" == "${CADDY_CORE_VERSION} "* ]] || return 1
+    build_info=$("$caddy_bin" build-info 2>/dev/null) || return 1
+    grep -F "$CADDY_L4_PACKAGE" <<<"$build_info" \
+        | grep -Fq "$CADDY_L4_VERSION" || return 1
+    caddy_has_required_layer4_modules "$caddy_bin"
+}
+
+prepare_caddy_rollback() {
+    if [[ "$CADDYFILE_ROLLBACK_PREPARED" == "1" ]]; then
+        return 0
+    fi
+    local backup_dir="/var/lib/dmz-webui/caddy-backups"
+    mkdir -p "$backup_dir"
+    CADDYFILE_PREVIOUS="${backup_dir}/Caddyfile.${TIMESTAMP:?}.before"
+    if [[ -f /etc/caddy/Caddyfile ]]; then
+        cp -a /etc/caddy/Caddyfile "$CADDYFILE_PREVIOUS"
+        CADDYFILE_HAD_PREVIOUS=1
+    else
+        CADDYFILE_HAD_PREVIOUS=0
+    fi
+    CADDYFILE_ROLLBACK_PREPARED=1
+}
+
+ensure_caddy_layer4() {
+    if [[ "${CADDY_MODE:-non443}" != "standard" ]]; then
+        info "非标准 443 模式不启用 TCP/SNI，跳过 Caddy Layer 4 安装"
+        return 0
+    fi
+    if caddy_is_expected_custom_build caddy; then
+        info "Caddy Layer 4 已安装（${CADDY_CORE_VERSION}, ${CADDY_L4_VERSION}）"
+        return 0
+    fi
+    local required_command
+    for required_command in curl dpkg-divert update-alternatives; do
+        if ! command -v "$required_command" >/dev/null 2>&1; then
+            error "安装 Caddy Layer 4 缺少命令: $required_command"
+            return 1
+        fi
+    done
+
+    local arch api_arch temp_dir candidate download_url build_info
+    arch=$(uname -m)
+    case "$arch" in
+        x86_64|amd64)
+            api_arch="amd64"
+            ;;
+        aarch64|arm64)
+            api_arch="arm64"
+            ;;
+        *)
+            error "Caddy Layer 4 暂不支持自动安装到架构: $arch"
+            return 1
+            ;;
+    esac
+
+    temp_dir=$(mktemp -d)
+    candidate="${temp_dir}/caddy"
+    download_url="https://caddyserver.com/api/download?os=linux&arch=${api_arch}&p=github.com%2Fmholt%2Fcaddy-l4%40${CADDY_L4_VERSION}"
+    info "下载固定插件版本的 Caddy 自定义构建（核心 ${CADDY_CORE_VERSION}，Layer 4 ${CADDY_L4_VERSION}）"
+    if ! curl -fsSL --retry 3 --connect-timeout 15 --max-time 300 \
+        "$download_url" -o "$candidate" >>"$LOG_FILE" 2>&1; then
+        error "Caddy 自定义构建下载失败"
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    chmod 755 "$candidate"
+
+    if ! caddy_is_expected_custom_build "$candidate"; then
+        error "下载的 Caddy 版本或 Layer 4 模块与固定版本不一致"
+        "$candidate" version >>"$LOG_FILE" 2>&1 || true
+        "$candidate" build-info >>"$LOG_FILE" 2>&1 || true
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    build_info=$("$candidate" build-info 2>/dev/null || true)
+    info "候选 Caddy 已核验: $("$candidate" version | head -1)"
+    if ! grep -F "$CADDY_L4_PACKAGE" <<<"$build_info" \
+        | grep -Fq "$CADDY_L4_VERSION"; then
+        error "候选 Caddy 未包含固定版本的 caddy-l4"
+        rm -rf "$temp_dir"
+        return 1
+    fi
+
+    if [[ -f /etc/caddy/Caddyfile ]]; then
+        if ! "$candidate" validate --config /etc/caddy/Caddyfile \
+            --adapter caddyfile >>"$LOG_FILE" 2>&1; then
+            error "候选 Caddy 无法验证当前 Caddyfile，未切换二进制"
+            rm -rf "$temp_dir"
+            return 1
+        fi
+    fi
+
+    local backup_dir="/var/lib/dmz-webui/caddy-binaries"
+    mkdir -p "$backup_dir"
+    if [[ -f /usr/bin/caddy.custom ]]; then
+        CADDY_CUSTOM_PREVIOUS="${backup_dir}/caddy.custom.${TIMESTAMP:?}.before"
+        cp -a /usr/bin/caddy.custom "$CADDY_CUSTOM_PREVIOUS"
+        CADDY_CUSTOM_HAD_PREVIOUS=1
+    else
+        CADDY_CUSTOM_HAD_PREVIOUS=0
+    fi
+
+    if ! dpkg-divert --list /usr/bin/caddy 2>/dev/null \
+        | grep -Fq /usr/bin/caddy.default; then
+        if ! dpkg-divert --divert /usr/bin/caddy.default \
+            --rename /usr/bin/caddy >>"$LOG_FILE" 2>&1; then
+            error "无法为系统 Caddy 二进制建立 dpkg diversion"
+            rm -rf "$temp_dir"
+            return 1
+        fi
+    fi
+    if ! update-alternatives --install /usr/bin/caddy caddy \
+        /usr/bin/caddy.default 10 >>"$LOG_FILE" 2>&1; then
+        error "无法注册系统 Caddy alternatives"
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    CADDY_CUSTOM_CHANGED=1
+    if ! install -m 755 "$candidate" /usr/bin/caddy.custom.new \
+        || ! mv /usr/bin/caddy.custom.new /usr/bin/caddy.custom \
+        || ! update-alternatives --install /usr/bin/caddy caddy \
+            /usr/bin/caddy.custom 50 >>"$LOG_FILE" 2>&1 \
+        || ! update-alternatives --set caddy /usr/bin/caddy.custom \
+            >>"$LOG_FILE" 2>&1; then
+        error "无法安装或选择 Caddy 自定义二进制"
+        rm -rf "$temp_dir"
+        return 1
+    fi
+    rm -rf "$temp_dir"
+
+    if ! caddy_is_expected_custom_build caddy; then
+        error "Caddy 自定义二进制切换后复核失败"
+        return 1
+    fi
+    info "Caddy 已切换到固定 Layer 4 自定义构建"
+}
+
+rollback_caddy_changes() {
+    local restored=0
+    if [[ "$CADDYFILE_ROLLBACK_PREPARED" == "1" ]]; then
+        if [[ "$CADDYFILE_HAD_PREVIOUS" == "1" && -f "$CADDYFILE_PREVIOUS" ]]; then
+            cp -a "$CADDYFILE_PREVIOUS" /etc/caddy/Caddyfile
+            restored=1
+        elif [[ "$CADDYFILE_HAD_PREVIOUS" == "0" ]]; then
+            rm -f /etc/caddy/Caddyfile
+            restored=1
+        fi
+    fi
+
+    if [[ "$CADDY_CUSTOM_CHANGED" == "1" ]]; then
+        if [[ "$CADDY_CUSTOM_HAD_PREVIOUS" == "1" \
+            && -f "$CADDY_CUSTOM_PREVIOUS" ]]; then
+            install -m 755 "$CADDY_CUSTOM_PREVIOUS" /usr/bin/caddy.custom
+            update-alternatives --set caddy /usr/bin/caddy.custom \
+                >>"$LOG_FILE" 2>&1 || true
+        else
+            update-alternatives --set caddy /usr/bin/caddy.default \
+                >>"$LOG_FILE" 2>&1 || true
+        fi
+        restored=1
+    fi
+
+    if [[ "$restored" == "1" ]]; then
+        if systemctl restart caddy >>"$LOG_FILE" 2>&1; then
+            warn "已恢复部署前的 Caddy 二进制与配置"
+        else
+            error "Caddy 回滚后重启失败，请立即检查 systemctl status caddy"
+        fi
+    fi
+}
+
 generate_caddyfile() {
     local generator="${INSTALL_DIR:?}/scripts/generate_caddyfile.py"
     local python_bin="${INSTALL_DIR}/venv/bin/python"
@@ -381,6 +582,7 @@ generate_caddyfile() {
     fi
 
     DMZ_DOMAIN="${DMZ_DOMAIN}" \
+    DMZ_ROUTE_DOMAIN="${DMZ_ROUTE_DOMAIN:-$(default_route_domain "$DMZ_DOMAIN")}" \
     DMZ_WEBUI_HOST="${DMZ_WEBUI_HOST:-127.0.0.1}" \
     DMZ_CADDY_PORT="${DMZ_CADDY_PORT:-8443}" \
     DMZ_CADDY_TLS_MODE="${DMZ_CADDY_TLS_MODE:-manual}" \

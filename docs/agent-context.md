@@ -2,14 +2,21 @@
 
 ## 当前主任务
 
-当前主任务是分离 WebUI 主机名与站点路由基础域名，并修复前端
-`[object Object]` 错误提示；实现与本地自动验证已完成，等待目标机验收。
+当前主任务是让 `derper.silvericekey.top:443` 与现有 Caddy HTTPS 站点共享
+443：按 TLS SNI 将 DERP 原始 TCP 流量透传到 `127.0.0.1:41103`，Headscale
+`127.0.0.1:9091` 仍使用现有 HTTP 反代。代码、文档和本地自动验证已完成，
+等待目标服务器部署联调。
 
 ## 当前入口
 
 - Caddy 路由实现：`backend/caddy_routes.py`
 - 后端/API 入口：`backend/main.py`
 - 部署生成入口：`scripts/generate_caddyfile.py`
+- 已归档计划：
+  `docs/archive/plans/PLAN-20260728-derp-sni-passthrough-v1.md`
+- 当前进度：`docs/progress/PROGRESS-20260728-derp-sni-passthrough-v1.md`
+- 当前报告：`docs/reports/REPORT-20260728-derp-sni-passthrough-v1.md`
+- 当前指南：`docs/guides/GUIDE-20260728-tcp-sni-passthrough-v1.md`
 - 当前进度：`docs/progress/PROGRESS-20260728-caddy-site-routes-v1.md`
 - 收口报告：`docs/reports/REPORT-20260728-caddy-site-routes-v1.md`
 - 收口报告：`docs/reports/REPORT-20260727-nftables-ownership-v1.md`
@@ -47,8 +54,10 @@
 
 ## 固定验收
 
-- `python3 -m unittest discover -s backend/tests -v`（当前 57 项）
+- `python3 -m unittest discover -s backend/tests -v`（当前 71 项）
 - `npm run build`（工作目录 `frontend`）
+- 固定自定义 Caddy 验证完整生成配置，并用高位端口检查 DERP SNI 证书与
+  普通 HTTPS 响应共存。
 - 目标服务器执行 `caddy validate --config /etc/caddy/Caddyfile
   --adapter caddyfile`，并检查 Caddy journal 中的 ACME 签发结果。
 - 端口转发生成配置执行 `nft -c -f -`。
@@ -63,10 +72,15 @@
 - 本机开放要求业务服务监听 `0.0.0.0` 或实际网卡；仅监听 `127.0.0.1`
   应继续通过 Caddy/SSL 代理暴露。
 - 二级域名自动证书要求标准 443 模式、DNS 指向本机且公网 80/443 可达。
-- 当前开发环境未安装 Caddy，真实配置校验和 ACME 签发必须在目标机完成。
+- 已下载固定自定义 Caddy 候选并完成真实配置校验，但未安装为本机系统服务；
+  ACME 和 systemd/alternatives 仍必须在目标机验证。
 - 动态标题尚未在目标机执行 `update.sh` 交互与浏览器人工验收。
 - 从旧版脚本自更新后需重新运行最新版 `update.sh`，才能看到新的分组提示。
-- 当前 Caddy 站点路由是 HTTP 层反代，不支持原始 TCP/SNI 透传或 DERP STUN
-  UDP。
+- 当前代码已支持 TCP/SNI 透传，但 DERP STUN UDP 仍不经过 Caddy。
+- 标准 443 部署会切换到 Caddy 2.11.4 + `caddy-l4` 0.1.0 自定义二进制；
+  目标机下载、alternatives 和回滚尚未实机验证。
+- DERP 必须自行终止 TLS；证书需命名为
+  `derper.silvericekey.top.crt/.key`，Caddy 不为透传流量签发证书。
+- `InsecureForTests` 只用于测试，生产 DERP map 不应设置。
 - 部署前必须备份 `/etc/nftables.conf`、完整 ruleset 和 `iptables-save`。
 - 不得通过重启 nftables、全局 flush 或重启 Docker完成迁移。

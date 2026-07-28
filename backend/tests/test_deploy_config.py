@@ -207,6 +207,60 @@ class DeployConfigTests(unittest.TestCase):
         self.assertIn("generate_caddyfile", deploy)
         self.assertIn("generate_caddyfile", update)
 
+    def test_expected_custom_caddy_requires_pinned_versions_and_modules(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            fake_caddy = Path(temp_dir) / "caddy"
+            fake_caddy.write_text(
+                """#!/bin/bash
+case "$1" in
+  version)
+    echo "v2.11.4 test"
+    ;;
+  build-info)
+    printf 'dep\\tgithub.com/mholt/caddy-l4\\tv0.1.0\\ttest\\n'
+    ;;
+  list-modules)
+    printf '%s\\n' \
+      caddy.listeners.layer4 \
+      layer4.handlers.proxy \
+      layer4.matchers.tls
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+"""
+            )
+            fake_caddy.chmod(0o755)
+            script = (
+                f"source {COMMON_SH!s}\n"
+                f"caddy_is_expected_custom_build {str(fake_caddy)!r}\n"
+            )
+            result = subprocess.run(
+                ["bash", "-uo", "pipefail", "-c", script],
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_deploy_and_update_install_and_rollback_layer4_caddy(self):
+        common = COMMON_SH.read_text()
+        deploy = (PROJECT_ROOT / "scripts" / "deploy.sh").read_text()
+        update = (PROJECT_ROOT / "scripts" / "update.sh").read_text()
+
+        self.assertIn('CADDY_CORE_VERSION="v2.11.4"', common)
+        self.assertIn('CADDY_L4_VERSION="v0.1.0"', common)
+        self.assertIn("caddy.listeners.layer4", common)
+        self.assertIn("dpkg-divert", common)
+        self.assertIn("update-alternatives", common)
+        self.assertIn("prepare_caddy_rollback", deploy)
+        self.assertIn("ensure_caddy_layer4", deploy)
+        self.assertIn("rollback_caddy_changes", deploy)
+        self.assertIn("prepare_caddy_rollback", update)
+        self.assertIn("ensure_caddy_layer4", update)
+        self.assertIn("rollback_caddy_changes", update)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,7 @@ import type { SiteRoute, SslProxyRule } from '../types';
 import NavbarBrand from '../components/NavbarBrand';
 import { usePublicConfig } from '../context/PublicConfigContext';
 import { formatApiError } from '../utils/errors';
+import SniRoutes from '../components/SniRoutes';
 
 function Navbar() {
   const logout = () => {
@@ -583,6 +584,8 @@ export default function SslProxyPage() {
             <div className="empty-state">暂无站点路由</div>
           )}
         </div>
+
+        <SniRoutes />
       </div>
 
       <RuleModal
