@@ -259,77 +259,24 @@ CFEOF
 # -------------- Caddyfile 生成 --------------
 
 generate_caddyfile() {
-    local domain="${DMZ_DOMAIN}"
-    local host="${DMZ_WEBUI_HOST:-127.0.0.1}"
+    local generator="${INSTALL_DIR:?}/scripts/generate_caddyfile.py"
+    local python_bin="${INSTALL_DIR}/venv/bin/python"
+    local site="${DMZ_DOMAIN}:${DMZ_CADDY_PORT:-8443}"
     local mode="${CADDY_MODE:-non443}"
-    local tls_mode="${DMZ_CADDY_TLS_MODE:-manual}"
-    local email="${ACME_EMAIL:-}"
-    local site tls_line
 
-    if [[ "$mode" == "standard" ]]; then
-        site="${domain}"
-        if [[ "$tls_mode" == "auto" ]]; then
-            if [[ -n "$email" ]]; then
-                tls_line="tls ${email}"
-            else
-                tls_line=""
-            fi
-        else
-            tls_line="tls internal"
-        fi
-    else
-        site="${domain}:8443"
-        if [[ "${USE_LE_CERT:-0}" == "1" ]]; then
-            tls_line="tls /etc/letsencrypt/live/${domain}/fullchain.pem /etc/letsencrypt/live/${domain}/privkey.pem"
-        else
-            tls_line="tls internal"
-        fi
+    info "生成完整 Caddyfile（站点: $(mask_domain "$site")）"
+    if [[ ! -f "$generator" || ! -x "$python_bin" ]]; then
+        error "Caddyfile 生成入口不可用: $generator"
+        return 1
     fi
 
-    info "生成 Caddyfile（模式: $mode, 站点: $(mask_domain "$site")）"
-
-    if [[ -n "$tls_line" ]]; then
-        tee /etc/caddy/Caddyfile > /dev/null <<CADDYEOF
-# DMZ WebUI 统一反代入口（模式: ${mode}）
-# 如需添加其他路径级反代，可通过 WebUI 的 SSL 代理功能或手动编辑此文件
-
-${site} {
-    encode gzip
-    ${tls_line}
-
-    route /admin* {
-        uri strip_prefix /admin
-        reverse_proxy ${host}:5000
-    }
-
-    route /assets* {
-        reverse_proxy ${host}:5000
-    }
-
-    redir / /admin 302
-}
-CADDYEOF
-    else
-        tee /etc/caddy/Caddyfile > /dev/null <<CADDYEOF
-# DMZ WebUI 统一反代入口（模式: ${mode}）
-# 如需添加其他路径级反代，可通过 WebUI 的 SSL 代理功能或手动编辑此文件
-
-${site} {
-    encode gzip
-
-    route /admin* {
-        uri strip_prefix /admin
-        reverse_proxy ${host}:5000
-    }
-
-    route /assets* {
-        reverse_proxy ${host}:5000
-    }
-
-    redir / /admin 302
-}
-CADDYEOF
-    fi
+    DMZ_DOMAIN="${DMZ_DOMAIN}" \
+    DMZ_WEBUI_HOST="${DMZ_WEBUI_HOST:-127.0.0.1}" \
+    DMZ_CADDY_PORT="${DMZ_CADDY_PORT:-8443}" \
+    DMZ_CADDY_TLS_MODE="${DMZ_CADDY_TLS_MODE:-manual}" \
+    DMZ_ACME_EMAIL="${ACME_EMAIL:-}" \
+    DMZ_SECRET_KEY="${DMZ_SECRET_KEY:-deploy-caddy-generation-only}" \
+        "$python_bin" "$generator"
 
     # 配置续期钩子（仅在非 443 模式且使用 LE 证书时）
     if [[ "$mode" == "non443" && "${USE_LE_CERT:-0}" == "1" ]]; then
@@ -358,6 +305,7 @@ Environment="DMZ_DOMAIN=${DMZ_DOMAIN}"
 Environment="DMZ_WEBUI_HOST=${DMZ_WEBUI_HOST:-127.0.0.1}"
 Environment="DMZ_CADDY_PORT=${DMZ_CADDY_PORT:-8443}"
 Environment="DMZ_CADDY_TLS_MODE=${DMZ_CADDY_TLS_MODE:-manual}"
+Environment="DMZ_ACME_EMAIL=${ACME_EMAIL:-}"
 Environment="DMZ_ICP_NUMBER=${DMZ_ICP_NUMBER:-}"
 EOF
     chmod 600 "${dropin_dir}/override.conf"

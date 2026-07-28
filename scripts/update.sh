@@ -264,6 +264,9 @@ fi
 step "5/9 配置静态文件"
 
 run_cmd "创建 static 目录" mkdir -p "$INSTALL_DIR/backend/static"
+run_cmd "创建 Caddy 静态站点目录" \
+    mkdir -p /var/lib/dmz-webui/caddy-static
+chmod 755 /var/lib/dmz-webui /var/lib/dmz-webui/caddy-static
 if run_cmd "复制前端产物" cp -r "$INSTALL_DIR/frontend/dist/"* "$INSTALL_DIR/backend/static/"; then
     info "静态文件配置完成"
 else

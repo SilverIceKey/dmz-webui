@@ -41,6 +41,19 @@ export interface SslProxyRule {
   comment?: string;
 }
 
+export interface SiteRoute {
+  id: number;
+  route_type: 'proxy' | 'static';
+  hostname: string;
+  path: string;
+  dest_host?: string;
+  dest_port?: number;
+  strip_prefix: boolean;
+  ssl_enabled: boolean;
+  static_directory?: string;
+  comment?: string;
+}
+
 export interface SystemMetrics {
   cpu_percent: number;
   memory: {

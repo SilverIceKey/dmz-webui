@@ -278,6 +278,16 @@ else
     info "SSL 代理规则文件已存在，跳过初始化"
 fi
 
+SITE_ROUTES_FILE="/etc/dmz-webui/site_routes.json"
+if [ ! -f "$SITE_ROUTES_FILE" ]; then
+    echo '[]' > "$SITE_ROUTES_FILE"
+    chmod 600 "$SITE_ROUTES_FILE"
+    info "站点路由规则文件已初始化: $SITE_ROUTES_FILE"
+fi
+run_cmd "创建 Caddy 静态站点目录" \
+    mkdir -p /var/lib/dmz-webui/caddy-static
+chmod 755 /var/lib/dmz-webui /var/lib/dmz-webui/caddy-static
+
 # 检查后端语法
 info "检查后端语法..."
 if "$INSTALL_DIR/venv/bin/python" -m py_compile "$INSTALL_DIR/backend/main.py" 2>>"$LOG_FILE"; then

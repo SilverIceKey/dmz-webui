@@ -25,6 +25,12 @@ from firewall import (
     normalize_named_block_closing_brace,
     upsert_named_block_in_parent,
 )
+from caddy_routes import (
+    append_caddy_site_route,
+    ensure_site_static_directory,
+    site_static_directory,
+    validate_site_route_conflicts,
+)
 
 app = FastAPI(title="DMZ WebUI")
 
@@ -58,6 +64,7 @@ DMZ_DOMAIN = os.environ.get("DMZ_DOMAIN", "example.com")
 DMZ_WEBUI_HOST = os.environ.get("DMZ_WEBUI_HOST", "127.0.0.1")
 DMZ_CADDY_PORT = int(os.environ.get("DMZ_CADDY_PORT", "8443"))
 DMZ_CADDY_TLS_MODE = os.environ.get("DMZ_CADDY_TLS_MODE", "manual")
+DMZ_ACME_EMAIL = os.environ.get("DMZ_ACME_EMAIL", "").strip()
 DMZ_ICP_NUMBER = os.environ.get("DMZ_ICP_NUMBER", "").strip()
 security = HTTPBearer()
 
@@ -66,6 +73,8 @@ NFTABLES_CONF = "/etc/nftables.conf"
 CADDYFILE = "/etc/caddy/Caddyfile"
 CONFIG_PATH = "/etc/dmz-webui/config.json"
 SSL_PROXY_RULES_PATH = "/etc/dmz-webui/ssl_proxy_rules.json"
+SITE_ROUTES_PATH = "/etc/dmz-webui/site_routes.json"
+SITE_STATIC_ROOT = "/var/lib/dmz-webui/caddy-static"
 
 # ----------------- Models -----------------
 
@@ -191,6 +200,97 @@ class SslProxyRuleCreate(BaseModel):
             raise ValueError("dest_ip is required")
         return v
 
+
+class SiteRouteCreate(BaseModel):
+    route_type: str
+    hostname: str
+    path: str
+    dest_host: Optional[str] = None
+    dest_port: Optional[int] = None
+    strip_prefix: bool = True
+    ssl_enabled: bool = True
+    comment: Optional[str] = ""
+
+    @field_validator("route_type")
+    @classmethod
+    def validate_route_type(cls, value: str) -> str:
+        value = value.strip().lower()
+        if value not in ("proxy", "static"):
+            raise ValueError("route_type must be proxy or static")
+        return value
+
+    @field_validator("hostname")
+    @classmethod
+    def validate_hostname(cls, value: str) -> str:
+        value = value.strip().lower().rstrip(".")
+        if not re.fullmatch(
+            r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*"
+            r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
+            value,
+        ):
+            raise ValueError("invalid hostname")
+        domain = DMZ_DOMAIN.lower().rstrip(".")
+        if value != domain and not value.endswith(f".{domain}"):
+            raise ValueError("hostname must use the configured main domain")
+        return value
+
+    @field_validator("path")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) > 1:
+            value = value.rstrip("/")
+        if (
+            not re.fullmatch(
+                r"/(?:[A-Za-z0-9._~!$&'()+,;=:@%-]+"
+                r"(?:/[A-Za-z0-9._~!$&'()+,;=:@%-]+)*)?",
+                value,
+            )
+            or ".." in value
+        ):
+            raise ValueError("invalid route path")
+        return value
+
+    @field_validator("comment")
+    @classmethod
+    def validate_comment(cls, value: Optional[str]) -> Optional[str]:
+        if value and ("\n" in value or "\r" in value):
+            raise ValueError("comment must be a single line")
+        return value
+
+    @model_validator(mode="after")
+    def validate_route_fields(self):
+        domain = DMZ_DOMAIN.lower().rstrip(".")
+        if self.hostname == domain:
+            reserved = ("/", "/admin", "/assets")
+            if self.path == "/" or any(
+                self.path == item or self.path.startswith(f"{item}/")
+                for item in reserved[1:]
+            ):
+                raise ValueError("path is reserved by the main domain")
+        elif DMZ_CADDY_PORT != 443:
+            raise ValueError(
+                "subdomain routes require standard port 443 mode"
+            )
+
+        if self.route_type == "proxy":
+            host = (self.dest_host or "").strip()
+            if not re.fullmatch(r"[A-Za-z0-9.-]+", host):
+                raise ValueError("invalid proxy destination host")
+            if not self.dest_port or not 1 <= self.dest_port <= 65535:
+                raise ValueError("proxy destination port must be between 1 and 65535")
+            self.dest_host = host
+        else:
+            self.dest_host = None
+            self.dest_port = None
+            self.strip_prefix = False
+        return self
+
+
+class SiteRoute(SiteRouteCreate):
+    id: int
+    static_directory: Optional[str] = None
+
 class ServiceStatus(BaseModel):
     name: str
     active: bool
@@ -257,6 +357,38 @@ def _next_ssl_proxy_id(rules: List[dict]) -> int:
     if not rules:
         return 1
     return max(r.get("id", 0) for r in rules) + 1
+
+
+def _load_site_routes() -> List[dict]:
+    if not os.path.exists(SITE_ROUTES_PATH):
+        return []
+    try:
+        with open(SITE_ROUTES_PATH, "r") as file:
+            data = json.load(file)
+        return data if isinstance(data, list) else []
+    except Exception as error:
+        print(f"[dmz-webui] Failed to load site routes: {error}")
+        return []
+
+
+def _save_site_routes(rules: List[dict]):
+    _atomic_write_text(SITE_ROUTES_PATH, json.dumps(rules, indent=2))
+
+
+def _next_site_route_id(rules: List[dict]) -> int:
+    return max((rule.get("id", 0) for rule in rules), default=0) + 1
+
+
+def _site_static_directory(rule_id: int) -> str:
+    return site_static_directory(SITE_STATIC_ROOT, rule_id)
+
+
+def _ensure_site_static_directory(rule_id: int) -> str:
+    return ensure_site_static_directory(SITE_STATIC_ROOT, rule_id)
+
+
+def _validate_site_route_conflicts(rules: List[dict]) -> None:
+    validate_site_route_conflicts(rules)
 
 # ----------------- Auth -----------------
 
@@ -886,6 +1018,114 @@ def delete_ssl_proxy_rule(rule_id: int, _: str = Depends(verify_token)):
         raise HTTPException(status_code=500, detail="SSL proxy apply failed; previous configuration restored") from error
     return {"ok": True}
 
+
+# ----------------- Caddy Site Routes -----------------
+
+def _site_route_response(rule: dict) -> SiteRoute:
+    data = dict(rule)
+    if data["route_type"] == "static":
+        data["static_directory"] = _site_static_directory(data["id"])
+    return SiteRoute(**data)
+
+
+@app.get("/api/caddy/site-routes", response_model=List[SiteRoute])
+def get_site_routes(_: str = Depends(verify_token)):
+    return [_site_route_response(rule) for rule in _load_site_routes()]
+
+
+@app.post("/api/caddy/site-routes")
+def create_site_route(
+    rule: SiteRouteCreate, _: str = Depends(verify_token)
+):
+    rules = _load_site_routes()
+    new_rule = {"id": _next_site_route_id(rules), **rule.model_dump()}
+    if new_rule["hostname"] == DMZ_DOMAIN.lower().rstrip("."):
+        new_rule["ssl_enabled"] = load_settings().get(
+            "https_enabled", True
+        )
+    candidate = [*rules, new_rule]
+    try:
+        _validate_site_route_conflicts(candidate)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if new_rule["route_type"] == "static":
+        _ensure_site_static_directory(new_rule["id"])
+    try:
+        _apply_site_routes(candidate)
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail="Site route apply failed; previous configuration restored",
+        ) from error
+    return {
+        "ok": True,
+        "id": new_rule["id"],
+        "static_directory": (
+            _site_static_directory(new_rule["id"])
+            if new_rule["route_type"] == "static"
+            else None
+        ),
+    }
+
+
+@app.put("/api/caddy/site-routes/{rule_id}")
+def edit_site_route(
+    rule_id: int,
+    rule: SiteRouteCreate,
+    _: str = Depends(verify_token),
+):
+    rules = _load_site_routes()
+    index = next(
+        (item for item, current in enumerate(rules) if current.get("id") == rule_id),
+        -1,
+    )
+    if index == -1:
+        raise HTTPException(status_code=404, detail="Site route not found")
+    candidate = list(rules)
+    candidate[index] = {"id": rule_id, **rule.model_dump()}
+    if candidate[index]["hostname"] == DMZ_DOMAIN.lower().rstrip("."):
+        candidate[index]["ssl_enabled"] = load_settings().get(
+            "https_enabled", True
+        )
+    try:
+        _validate_site_route_conflicts(candidate)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if rule.route_type == "static":
+        _ensure_site_static_directory(rule_id)
+    try:
+        _apply_site_routes(candidate)
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail="Site route apply failed; previous configuration restored",
+        ) from error
+    return {
+        "ok": True,
+        "static_directory": (
+            _site_static_directory(rule_id)
+            if rule.route_type == "static"
+            else None
+        ),
+    }
+
+
+@app.delete("/api/caddy/site-routes/{rule_id}")
+def delete_site_route(rule_id: int, _: str = Depends(verify_token)):
+    rules = _load_site_routes()
+    candidate = [rule for rule in rules if rule.get("id") != rule_id]
+    if len(candidate) == len(rules):
+        raise HTTPException(status_code=404, detail="Site route not found")
+    try:
+        _apply_site_routes(candidate)
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail="Site route apply failed; previous configuration restored",
+        ) from error
+    return {"ok": True}
+
+
 # ----------------- Caddy -----------------
 
 def _read_caddy() -> str:
@@ -903,9 +1143,27 @@ def _tls_line(domain: str) -> str:
         return f"tls {cert_dir}/fullchain.pem {cert_dir}/privkey.pem"
     return "tls internal"
 
-def _build_caddyfile(rules: Optional[List[dict]] = None) -> str:
+def _append_caddy_site_route(lines: List[str], rule: dict) -> None:
+    append_caddy_site_route(lines, rule, SITE_STATIC_ROOT)
+
+
+def _build_caddyfile(
+    rules: Optional[List[dict]] = None,
+    site_routes: Optional[List[dict]] = None,
+) -> str:
     settings = load_settings()
     domain = DMZ_DOMAIN
+    configured_site_routes = (
+        site_routes if site_routes is not None else _load_site_routes()
+    )
+    routes_by_hostname: dict[str, List[dict]] = {}
+    for rule in configured_site_routes:
+        routes_by_hostname.setdefault(rule["hostname"], []).append(rule)
+    for hostname_rules in routes_by_hostname.values():
+        hostname_rules.sort(
+            key=lambda item: len(item["path"]),
+            reverse=True,
+        )
 
     if settings.get("https_enabled", True):
         if DMZ_CADDY_TLS_MODE == "auto":
@@ -915,13 +1173,21 @@ def _build_caddyfile(rules: Optional[List[dict]] = None) -> str:
     else:
         tls_line = "auto_https off"
 
-    lines = [f"{domain}:{DMZ_CADDY_PORT} {{"]
+    lines = []
+    if (
+        DMZ_CADDY_TLS_MODE == "auto"
+        and re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", DMZ_ACME_EMAIL)
+    ):
+        lines.extend(["{", f"    email {DMZ_ACME_EMAIL}", "}", ""])
+    lines.append(f"{domain}:{DMZ_CADDY_PORT} {{")
     lines.append("    encode gzip")
     if tls_line:
         lines.append(f"    {tls_line}")
     lines.append("")
 
-    # WebUI routes only
+    for route in routes_by_hostname.pop(domain, []):
+        _append_caddy_site_route(lines, route)
+
     lines.append("    route /admin* {")
     lines.append("        uri strip_prefix /admin")
     lines.append(f"        reverse_proxy {DMZ_WEBUI_HOST}:5000")
@@ -935,6 +1201,17 @@ def _build_caddyfile(rules: Optional[List[dict]] = None) -> str:
     lines.append("    redir / /admin 302")
     lines.append("}")
     lines.append("")
+
+    for hostname, hostname_routes in sorted(routes_by_hostname.items()):
+        ssl_enabled = hostname_routes[0].get("ssl_enabled", True)
+        site_address = hostname if ssl_enabled else f"http://{hostname}"
+        lines.append(f"{site_address} {{")
+        lines.append("    encode gzip")
+        lines.append("")
+        for route in hostname_routes:
+            _append_caddy_site_route(lines, route)
+        lines.append("}")
+        lines.append("")
 
     # SSL proxy sites
     for rule in rules if rules is not None else _load_ssl_proxy_rules():
@@ -952,6 +1229,30 @@ def _build_caddyfile(rules: Optional[List[dict]] = None) -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+def _apply_site_routes(rules: List[dict]):
+    old_caddy = _read_caddy()
+    new_caddy = _build_caddyfile(site_routes=rules)
+    _validate_caddy(new_caddy)
+
+    caddy_changed = False
+    try:
+        _write_caddy(new_caddy)
+        caddy_changed = True
+        _reload_caddy()
+        _save_site_routes(rules)
+    except Exception:
+        if caddy_changed:
+            try:
+                _write_caddy(old_caddy)
+                _reload_caddy()
+            except Exception as rollback_error:
+                print(
+                    "[dmz-webui] site route Caddy rollback failed: "
+                    f"{rollback_error}"
+                )
+        raise
 
 
 def _regenerate_caddyfile():

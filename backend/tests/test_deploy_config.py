@@ -36,6 +36,18 @@ class DeployConfigTests(unittest.TestCase):
         self.assertIn("DMZ_ICP_NUMBER='${DMZ_ICP_NUMBER:-}'", source)
         self.assertIn('Environment="DMZ_ICP_NUMBER=${DMZ_ICP_NUMBER:-}"', source)
 
+    def test_deploy_and_update_use_complete_python_caddy_generator(self):
+        common = COMMON_SH.read_text()
+        deploy = (PROJECT_ROOT / "scripts" / "deploy.sh").read_text()
+        update = (PROJECT_ROOT / "scripts" / "update.sh").read_text()
+
+        self.assertIn("scripts/generate_caddyfile.py", common)
+        self.assertNotIn("CADDYEOF", common)
+        self.assertIn('DMZ_ACME_EMAIL="${ACME_EMAIL:-}"', common)
+        self.assertIn('Environment="DMZ_ACME_EMAIL=${ACME_EMAIL:-}"', common)
+        self.assertIn("generate_caddyfile", deploy)
+        self.assertIn("generate_caddyfile", update)
+
 
 if __name__ == "__main__":
     unittest.main()

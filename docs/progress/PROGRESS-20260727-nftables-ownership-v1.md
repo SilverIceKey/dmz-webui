@@ -38,6 +38,8 @@
 
 ## 下一步
 
+- Caddy 域名与路径路由已转入
+  `docs/progress/PROGRESS-20260728-caddy-site-routes-v1.md` 跟踪。
 - 在目标服务器部署后采集 dmz-webui、Caddy journal 与浏览器 Network 证据。
 - 复验防火墙与 SSL 页面的新增、修改、删除成功提示及实际运行态。
 - 复验本机开放的全部/大陆/境外/自定义白名单和服务外部连通性。

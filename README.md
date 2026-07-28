@@ -5,7 +5,7 @@ DMZ 网络管控 Web 管理界面。基于 React + TypeScript 前端、Python Fa
 ## 功能
 
 - **防火墙规则管理**：分别管理 nftables 端口转发和本机端口开放规则
-- **反向代理管理**：增删改查 Caddy 路径级反向代理
+- **站点路由管理**：按主域名/子域名和路径管理 Caddy 反向代理及静态文件
 - **端口进程查看**：实时查看系统监听端口与占用进程
 - **服务状态监控**：nftables / caddy 运行状态与一键重载
 - **Linux 系统账户登录**：通过 PAM 使用系统用户认证
@@ -22,6 +22,7 @@ DMZ 网络管控 Web 管理界面。基于 React + TypeScript 前端、Python Fa
 dmz-webui/
 ├── backend/
 │   ├── main.py              # FastAPI 主程序
+│   ├── caddy_routes.py      # 站点路由冲突检查与 Caddy 片段生成
 │   ├── firewall.py          # 项目独占 nftables 表的校验与定向应用
 │   ├── requirements.txt     # Python 依赖
 │   └── static/              # 前端构建产物（部署时生成）
@@ -137,6 +138,40 @@ sudo systemctl start dmz-webui
 本机端口开放不会启动服务，也不会改变服务监听地址。仅监听
 `127.0.0.1` 的服务仍不能通过公网地址直接访问；这类服务应通过 Caddy/SSL
 代理暴露，或调整服务自身的监听地址。
+
+## 域名与路径路由
+
+“SSL 代理”页面的“域名与路径路由”支持：
+
+- 反向代理，例如将 `https://headscale.example.com/` 转发到
+  `127.0.0.1:9091`。
+- 非根路径反向代理，并可选择转发前是否去掉路径前缀。
+- 主域名或子域名静态文件，例如提供
+  `https://static.example.com/derper.json`。
+
+站点路由的域名必须是部署主域名或其子域名。主域名的 `/`、`/admin` 和
+`/assets` 保留给 WebUI；同一域名下不允许路径重复或父子路径重叠。
+
+二级域名启用 SSL 时，程序生成 Caddy 自动 HTTPS 站点配置。Caddy 会自动
+申请并续签证书，无需为每个二级域名单独运行 certbot。使用前必须满足：
+
+1. 部署使用标准 443 模式。
+2. 二级域名的 A/AAAA 记录已解析到本机。
+3. 公网 80 和 443 端口能到达 Caddy。
+
+如果关闭 SSL，则该二级域名生成普通 `http://` 站点。同一个二级域名下的
+所有路径必须使用相同的 SSL 设置。
+
+静态规则保存后会显示专属目录：
+
+```text
+/var/lib/dmz-webui/caddy-static/<规则 ID>/
+```
+
+例如规则路径为 `/derper.json`，应将文件放到该目录下的
+`derper.json`。配置子域名根路径 `/` 时，可按相对 URL 访问目录中的文件，
+但不提供目录列表。文件和子目录需允许 `caddy` 服务用户读取。删除规则只
+撤销访问路由，不删除已有文件。
 
 ## 管理命令
 

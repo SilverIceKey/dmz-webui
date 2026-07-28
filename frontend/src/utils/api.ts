@@ -41,6 +41,14 @@ export const sslProxy = {
   remove: (id: number) => api.delete(`/ssl-proxy/rules/${id}`),
 };
 
+export const siteRoutes = {
+  list: () => api.get('/caddy/site-routes'),
+  create: (data: any) => api.post('/caddy/site-routes', data),
+  update: (id: number, data: any) =>
+    api.put(`/caddy/site-routes/${id}`, data),
+  remove: (id: number) => api.delete(`/caddy/site-routes/${id}`),
+};
+
 export const nftables = {
   list: () => api.get('/nftables/rules'),
   create: (data: any) => api.post('/nftables/rules', data),
