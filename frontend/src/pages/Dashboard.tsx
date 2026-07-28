@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { services, ports, system } from '../utils/api';
 import type { ServiceStatus, PortProcess, SystemMetrics } from '../types';
+import NavbarBrand from '../components/NavbarBrand';
 import {
   LineChart,
   Line,
@@ -19,7 +20,7 @@ function Navbar() {
   };
   return (
     <nav className="navbar">
-      <div className="navbar-brand">DMZ WebUI</div>
+      <NavbarBrand />
       <div className="navbar-links">
         <a href="/admin">概览</a>
         <a href="/admin/nftables">防火墙</a>

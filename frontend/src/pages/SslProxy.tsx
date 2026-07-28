@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { siteRoutes, sslProxy } from '../utils/api';
 import type { SiteRoute, SslProxyRule } from '../types';
+import NavbarBrand from '../components/NavbarBrand';
 
 function Navbar() {
   const logout = () => {
@@ -9,7 +10,7 @@ function Navbar() {
   };
   return (
     <nav className="navbar">
-      <div className="navbar-brand">DMZ WebUI</div>
+      <NavbarBrand />
       <div className="navbar-links">
         <a href="/admin">概览</a>
         <a href="/admin/nftables">防火墙</a>

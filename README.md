@@ -73,7 +73,8 @@ Docker、iptables-nft 及其他程序管理的表和链不属于 DMZ WebUI 的�
 
 > 如果系统已安装 `ufw`，脚本会自动备份并禁用 `ufw`，后续防火墙统一由 nftables 管理。
 > 你也可以提前设置环境变量 `DMZ_DOMAIN`、`DMZ_WEBUI_HOST`、
-> `DMZ_ICP_NUMBER`、`CF_API_KEY`、`CF_EMAIL`，脚本会将其作为默认值。
+> `DMZ_SITE_TITLE`、`DMZ_TAB_TITLE`、`DMZ_ICP_NUMBER`、`CF_API_KEY`、
+> `CF_EMAIL`，脚本会将其作为默认值。
 > `DMZ_ICP_NUMBER` 留空时登录页不显示备案链接；配置会保存在
 > `/etc/dmz-webui/install.conf` 并由后续更新复用。
 
@@ -99,6 +100,15 @@ sudo ./scripts/update.sh
 8. **失败回滚**：任何步骤失败自动恢复旧版本并重启服务
 
 **日志位置：** `/var/log/dmz-webui/update-<timestamp>.log`
+
+更新脚本检测到已有部署配置时会询问是否复用。选择不复用后，可以交互式
+修改“站点标题”和“浏览器页签标题”：
+
+- 站点标题显示在登录页和登录后导航栏左侧。
+- 页签标题显示在浏览器标签页。
+- 直接回车保留当前值，输入 `-` 恢复默认值 `DMZ WebUI`。
+- 标题配置保存在 `/etc/dmz-webui/install.conf`，并通过 systemd 环境变量
+  提供给后端；旧配置缺少字段时自动使用默认值。
 
 ### 手动回滚
 

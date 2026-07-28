@@ -16,6 +16,42 @@ validate_icp_number() {
     [[ -z "$value" ]] || [[ "$value" =~ ^[京津沪渝冀豫云辽黑湘皖鲁新苏浙赣鄂桂甘晋蒙陕吉闽贵粤青藏川宁琼]ICP备[0-9]+号(-[0-9]+)?$ ]]
 }
 
+validate_title() {
+    local value="$1"
+    if [[ -z "$value" || ${#value} -gt 80 ]]; then
+        return 1
+    fi
+    case "$value" in
+        *"'"*|*'"'*|*\\*)
+            return 1
+            ;;
+    esac
+    ! printf '%s' "$value" | LC_ALL=C grep -q '[[:cntrl:]]'
+}
+
+prompt_title_config() {
+    local variable_name="$1"
+    local label="$2"
+    local current_value="${!variable_name:-DMZ WebUI}"
+    local input
+
+    while true; do
+        read -rp "请输入${label} [${current_value}]（输入 - 恢复默认）: " input
+        input="${input#"${input%%[![:space:]]*}"}"
+        input="${input%"${input##*[![:space:]]}"}"
+        if [[ "$input" == "-" ]]; then
+            input="DMZ WebUI"
+        else
+            input="${input:-$current_value}"
+        fi
+        if validate_title "$input"; then
+            printf -v "$variable_name" '%s' "$input"
+            return 0
+        fi
+        warn "${label}必须为 1-80 个可打印字符，且不能包含引号或反斜杠"
+    done
+}
+
 mask_domain() {
     local d="$1"
     if [[ -z "$d" || "$d" == "example.com" ]]; then
@@ -52,6 +88,8 @@ CADDY_MODE='${CADDY_MODE:-non443}'
 DMZ_CADDY_PORT='${DMZ_CADDY_PORT:-8443}'
 DMZ_CADDY_TLS_MODE='${DMZ_CADDY_TLS_MODE:-manual}'
 DMZ_ICP_NUMBER='${DMZ_ICP_NUMBER:-}'
+DMZ_SITE_TITLE='${DMZ_SITE_TITLE:-DMZ WebUI}'
+DMZ_TAB_TITLE='${DMZ_TAB_TITLE:-DMZ WebUI}'
 ACME_EMAIL='${ACME_EMAIL:-}'
 EOF
     chmod 600 "$CONFIG_FILE"
@@ -134,6 +172,9 @@ prompt_config() {
     local host_input
     read -rp "请输入 WebUI 后端监听地址 [${DMZ_WEBUI_HOST:-127.0.0.1}]: " host_input
     DMZ_WEBUI_HOST="${host_input:-${DMZ_WEBUI_HOST:-127.0.0.1}}"
+
+    prompt_title_config DMZ_SITE_TITLE "站点标题"
+    prompt_title_config DMZ_TAB_TITLE "浏览器页签标题"
 
     local icp_default="${DMZ_ICP_NUMBER:-}"
     while true; do
@@ -307,6 +348,8 @@ Environment="DMZ_CADDY_PORT=${DMZ_CADDY_PORT:-8443}"
 Environment="DMZ_CADDY_TLS_MODE=${DMZ_CADDY_TLS_MODE:-manual}"
 Environment="DMZ_ACME_EMAIL=${ACME_EMAIL:-}"
 Environment="DMZ_ICP_NUMBER=${DMZ_ICP_NUMBER:-}"
+Environment="DMZ_SITE_TITLE=${DMZ_SITE_TITLE:-DMZ WebUI}"
+Environment="DMZ_TAB_TITLE=${DMZ_TAB_TITLE:-DMZ WebUI}"
 EOF
     chmod 600 "${dropin_dir}/override.conf"
     info "systemd 环境变量覆盖已写入: ${dropin_dir}/override.conf"

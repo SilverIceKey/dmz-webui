@@ -1,18 +1,16 @@
-import { useEffect, useState } from 'react';
-import { auth, publicConfig } from '../utils/api';
+import { useState } from 'react';
+import { auth } from '../utils/api';
+import { usePublicConfig } from '../context/PublicConfigContext';
 
 export default function Login() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [icpNumber, setIcpNumber] = useState('');
-
-  useEffect(() => {
-    publicConfig.get()
-      .then((response) => setIcpNumber(response.data.icp_number || ''))
-      .catch(() => setIcpNumber(''));
-  }, []);
+  const {
+    icp_number: icpNumber,
+    site_title: siteTitle,
+  } = usePublicConfig();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -33,7 +31,7 @@ export default function Login() {
     <div className="login-wrap">
       <div className="login-panel">
         <div className="login-card">
-          <h1>DMZ WebUI</h1>
+          <h1>{siteTitle}</h1>
           <p style={{ textAlign: 'center', color: '#718093', marginBottom: 20, fontSize: 13 }}>
             使用 Linux 系统账户登录
           </p>

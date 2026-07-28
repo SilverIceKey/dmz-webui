@@ -1,4 +1,5 @@
 import axios from 'axios';
+import type { PublicConfig } from '../types';
 
 const api = axios.create({
   baseURL: '/admin/api',
@@ -31,7 +32,7 @@ export const auth = {
 };
 
 export const publicConfig = {
-  get: () => api.get('/public-config'),
+  get: () => api.get<PublicConfig>('/public-config'),
 };
 
 export const sslProxy = {

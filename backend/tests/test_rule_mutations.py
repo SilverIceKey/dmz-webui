@@ -134,11 +134,33 @@ class CaddyReloadTests(unittest.TestCase):
 
 
 class EndpointMutationTests(unittest.TestCase):
-    def test_public_config_exposes_only_the_icp_number_without_auth(self):
-        with patch.object(main, "DMZ_ICP_NUMBER", "浙ICP备12345678号"):
+    def test_title_environment_uses_safe_default(self):
+        with patch.dict(main.os.environ, {
+            "DMZ_SITE_TITLE": "  银钥管理  ",
+            "DMZ_TAB_TITLE": "bad\nvalue",
+        }):
+            self.assertEqual(
+                main._configured_title("DMZ_SITE_TITLE"),
+                "银钥管理",
+            )
+            self.assertEqual(
+                main._configured_title("DMZ_TAB_TITLE"),
+                "DMZ WebUI",
+            )
+
+    def test_public_config_exposes_branding_without_auth(self):
+        with (
+            patch.object(main, "DMZ_ICP_NUMBER", "浙ICP备12345678号"),
+            patch.object(main, "DMZ_SITE_TITLE", "银钥管理"),
+            patch.object(main, "DMZ_TAB_TITLE", "银钥控制台"),
+        ):
             result = main.get_public_config()
 
-        self.assertEqual(result, {"icp_number": "浙ICP备12345678号"})
+        self.assertEqual(result, {
+            "icp_number": "浙ICP备12345678号",
+            "site_title": "银钥管理",
+            "tab_title": "银钥控制台",
+        })
         route = next(route for route in main.app.routes if route.path == "/api/public-config")
         self.assertEqual(route.dependant.dependencies, [])
 

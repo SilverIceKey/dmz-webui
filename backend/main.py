@@ -66,6 +66,21 @@ DMZ_CADDY_PORT = int(os.environ.get("DMZ_CADDY_PORT", "8443"))
 DMZ_CADDY_TLS_MODE = os.environ.get("DMZ_CADDY_TLS_MODE", "manual")
 DMZ_ACME_EMAIL = os.environ.get("DMZ_ACME_EMAIL", "").strip()
 DMZ_ICP_NUMBER = os.environ.get("DMZ_ICP_NUMBER", "").strip()
+
+
+def _configured_title(variable_name: str) -> str:
+    value = os.environ.get(variable_name, "").strip()
+    if (
+        not value
+        or len(value) > 80
+        or any(not character.isprintable() for character in value)
+    ):
+        return "DMZ WebUI"
+    return value
+
+
+DMZ_SITE_TITLE = _configured_title("DMZ_SITE_TITLE")
+DMZ_TAB_TITLE = _configured_title("DMZ_TAB_TITLE")
 security = HTTPBearer()
 
 # Paths
@@ -320,6 +335,8 @@ class AppSettings(BaseModel):
 
 class PublicConfig(BaseModel):
     icp_number: str = ""
+    site_title: str = "DMZ WebUI"
+    tab_title: str = "DMZ WebUI"
 
 # ----------------- Settings -----------------
 
@@ -417,7 +434,11 @@ def login(req: LoginRequest):
 
 @app.get("/api/public-config", response_model=PublicConfig)
 def get_public_config():
-    return {"icp_number": DMZ_ICP_NUMBER}
+    return {
+        "icp_number": DMZ_ICP_NUMBER,
+        "site_title": DMZ_SITE_TITLE,
+        "tab_title": DMZ_TAB_TITLE,
+    }
 
 @app.get("/api/settings")
 def get_settings(_: str = Depends(verify_token)):
