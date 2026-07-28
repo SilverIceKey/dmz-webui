@@ -1,4 +1,5 @@
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -93,6 +94,88 @@ class DeployConfigTests(unittest.TestCase):
             'Environment="DMZ_TAB_TITLE=${DMZ_TAB_TITLE:-DMZ WebUI}"',
             source,
         )
+
+    def test_existing_config_confirms_groups_and_only_changes_branding(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_file = Path(temp_dir) / "install.conf"
+            config_file.write_text(
+                "\n".join([
+                    "DMZ_DOMAIN='example.com'",
+                    "DMZ_WEBUI_HOST='127.0.0.1'",
+                    "CADDY_MODE='standard'",
+                    "DMZ_CADDY_PORT='443'",
+                    "DMZ_CADDY_TLS_MODE='auto'",
+                    "DMZ_ICP_NUMBER='浙ICP备12345678号'",
+                    "DMZ_SITE_TITLE='旧站点'",
+                    "DMZ_TAB_TITLE='旧页签'",
+                    "ACME_EMAIL='ops@example.com'",
+                    "",
+                ])
+            )
+            script = (
+                "info() { :; }\n"
+                "warn() { :; }\n"
+                f"source {COMMON_SH!s}\n"
+                f"CONFIG_FILE={str(config_file)!r}\n"
+                "prompt_config <<'INPUT'\n"
+                "n\n"
+                "y\n"
+                "新站点\n"
+                "新页签\n"
+                "n\n"
+                "INPUT\n"
+                "source \"$CONFIG_FILE\"\n"
+                'test "$DMZ_DOMAIN" = "example.com"\n'
+                'test "$CADDY_MODE" = "standard"\n'
+                'test "$DMZ_CADDY_PORT" = "443"\n'
+                'test "$DMZ_CADDY_TLS_MODE" = "auto"\n'
+                'test "$DMZ_SITE_TITLE" = "新站点"\n'
+                'test "$DMZ_TAB_TITLE" = "新页签"\n'
+                'test "$DMZ_ICP_NUMBER" = "浙ICP备12345678号"\n'
+            )
+            result = subprocess.run(
+                ["bash", "-uo", "pipefail", "-c", script],
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_caddy_group_keeps_current_mode_on_empty_input(self):
+        script = (
+            "info() { :; }\n"
+            "warn() { :; }\n"
+            f"source {COMMON_SH!s}\n"
+            "DMZ_DOMAIN='example.com'\n"
+            "DMZ_WEBUI_HOST='127.0.0.1'\n"
+            "CADDY_MODE='standard'\n"
+            "DMZ_CADDY_PORT='443'\n"
+            "DMZ_CADDY_TLS_MODE='auto'\n"
+            "ACME_EMAIL='ops@example.com'\n"
+            "prompt_public_caddy_config <<'INPUT'\n"
+            "\n"
+            "\n"
+            "\n"
+            "\n"
+            "INPUT\n"
+            'test "$CADDY_MODE" = "standard"\n'
+            'test "$DMZ_CADDY_PORT" = "443"\n'
+            'test "$DMZ_CADDY_TLS_MODE" = "auto"\n'
+            'test "$ACME_EMAIL" = "ops@example.com"\n'
+        )
+        result = subprocess.run(
+            ["bash", "-uo", "pipefail", "-c", script],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_config_flow_has_no_global_reuse_shortcut(self):
+        source = COMMON_SH.read_text()
+        self.assertNotIn("是否复用? [Y/n]", source)
+        self.assertIn("是否修改公网与 Caddy 配置？", source)
+        self.assertIn("是否修改页面标题配置？", source)
+        self.assertIn("是否修改备案配置？", source)
 
     def test_deploy_and_update_use_complete_python_caddy_generator(self):
         common = COMMON_SH.read_text()

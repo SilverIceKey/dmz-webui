@@ -24,8 +24,9 @@
 
 `scripts/common.sh` 负责统一校验、交互输入、写入
 `/etc/dmz-webui/install.conf` 和 systemd override。`deploy.sh` 与
-`update.sh` 原本就复用该入口，因此两条链路行为一致。更新时选择不复用旧
-配置即可修改标题；回车保留当前值，输入 `-` 恢复 `DMZ WebUI`。
+`update.sh` 原本就复用该入口，因此两条链路行为一致。后续修复已把公网与
+Caddy、页面标题、备案拆为三个独立确认分组；只选择修改页面标题即可。标题
+输入回车保留当前值，输入 `-` 恢复 `DMZ WebUI`。
 
 后端公开配置接口新增 `site_title` 和 `tab_title`。环境变量为空、超长或
 包含不可打印字符时回退默认值。
@@ -39,7 +40,7 @@
 已执行：
 
 1. `python3 -m unittest discover -s backend/tests -v`
-   - 51 项通过。
+   - 54 项通过。
    - 覆盖标题 Unicode 输入、空值、超长、换行/引号注入、首尾空白处理、
      默认值恢复、配置持久化和公开接口返回。
 2. `npm run build`（`frontend`）

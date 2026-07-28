@@ -9,7 +9,7 @@
 
 - 新增 `DMZ_SITE_TITLE` 和 `DMZ_TAB_TITLE`，默认值均为 `DMZ WebUI`。
 - `scripts/common.sh` 统一供 `deploy.sh` 和 `update.sh` 交互修改、保存并写入
-  systemd override。
+  systemd override；公网/Caddy、页面标题和备案现分别确认。
 - 标题输入去除首尾空白；直接回车保留当前值，输入 `-` 恢复默认值。
 - 标题限制为 1-80 个可打印字符，并拒绝会破坏 shell/systemd 配置的引号和
   反斜杠。
@@ -17,12 +17,12 @@
 - 前端应用入口只请求一次公共配置；登录页和所有导航栏共享站点标题，
   `document.title` 使用页签标题。
 - 公共配置失败或旧配置缺少字段时使用 `DMZ WebUI`，不阻断登录及其他页面。
-- 后端 51 项测试通过，前端生产构建通过。
+- 后端 54 项测试通过，前端生产构建通过。
 
 ## 下一步
 
-- 在目标服务器运行 `sudo ./scripts/update.sh`，选择不复用旧配置并输入两个
-  新标题。
+- 在目标服务器运行 `sudo ./scripts/update.sh`，跳过公网/Caddy 分组，只修改
+  页面标题分组。
 - 核对 `/etc/dmz-webui/install.conf` 和 systemd override 中的持久化值。
 - 浏览器验证登录页、四个导航栏和页签标题，随后再执行一次更新确认复用。
 

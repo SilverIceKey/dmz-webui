@@ -78,7 +78,7 @@ load_config() {
 }
 
 save_config() {
-    mkdir -p /etc/dmz-webui
+    mkdir -p "$(dirname "$CONFIG_FILE")"
     cat > "$CONFIG_FILE" <<EOF
 # DMZ WebUI 部署配置（由 scripts/deploy.sh / scripts/update.sh 生成）
 # 时间戳: $(date '+%Y-%m-%d %H:%M:%S')
@@ -96,19 +96,9 @@ EOF
     info "部署配置已保存: $CONFIG_FILE（域名已脱敏: $(mask_domain "$DMZ_DOMAIN")）"
 }
 
-prompt_config() {
-    if load_config; then
-        local reuse
-        read -rp "检测到已有部署配置（域名: $(mask_domain "$DMZ_DOMAIN")），是否复用? [Y/n]: " reuse
-        if [[ "${reuse:-Y}" =~ ^[Yy]$ ]]; then
-            info "复用已有配置: $(mask_domain "$DMZ_DOMAIN")"
-            return 0
-        fi
-    fi
-
-    info "开始交互式收集部署配置..."
-
+prompt_public_caddy_config() {
     local domain_default="${DMZ_DOMAIN:-}"
+    local domain_input
     while true; do
         if [[ -n "$domain_default" ]]; then
             read -rp "请输入公网域名 [${domain_default}]: " domain_input
@@ -127,9 +117,14 @@ prompt_config() {
     echo "请选择 Caddy 部署模式："
     echo "  1) 标准 443 端口 + Caddy 自动 HTTPS（需要域名已解析到本机，且 80/443 端口可达）"
     echo "  2) 非 443 端口 8443 + Let's Encrypt DNS 证书 / 自签名（当前方式，443 被封锁或不方便暴露时使用）"
-    local mode_choice
-    read -rp "选项 [1/2，默认 2]: " mode_choice
-    case "${mode_choice:-2}" in
+    local mode_choice mode_default
+    if [[ "${CADDY_MODE:-non443}" == "standard" ]]; then
+        mode_default=1
+    else
+        mode_default=2
+    fi
+    read -rp "选项 [1/2，默认 ${mode_default}]: " mode_choice
+    case "${mode_choice:-$mode_default}" in
         1)
             CADDY_MODE="standard"
             DMZ_CADDY_PORT=443
@@ -143,13 +138,21 @@ prompt_config() {
     esac
     info "已选择 Caddy 模式: $CADDY_MODE (端口: $DMZ_CADDY_PORT)"
 
-    ACME_EMAIL=""
     if [[ "$CADDY_MODE" == "standard" ]]; then
-        read -rp "请输入 ACME 邮箱（可选，留空则 Caddy 自动处理）: " ACME_EMAIL
+        local acme_default="${ACME_EMAIL:-}"
+        local acme_input
+        read -rp "请输入 ACME 邮箱 [${acme_default:-留空由 Caddy 自动处理}]（输入 - 清空）: " acme_input
+        if [[ "$acme_input" == "-" ]]; then
+            ACME_EMAIL=""
+        else
+            ACME_EMAIL="${acme_input:-$acme_default}"
+        fi
         if [[ -n "$ACME_EMAIL" && ! "$ACME_EMAIL" =~ ^[^@]+@[^@]+\.[^@]+$ ]]; then
             warn "邮箱格式不正确，已忽略"
             ACME_EMAIL=""
         fi
+    else
+        ACME_EMAIL=""
     fi
 
     CF_API_KEY=""
@@ -172,11 +175,16 @@ prompt_config() {
     local host_input
     read -rp "请输入 WebUI 后端监听地址 [${DMZ_WEBUI_HOST:-127.0.0.1}]: " host_input
     DMZ_WEBUI_HOST="${host_input:-${DMZ_WEBUI_HOST:-127.0.0.1}}"
+}
 
+prompt_branding_config() {
     prompt_title_config DMZ_SITE_TITLE "站点标题"
     prompt_title_config DMZ_TAB_TITLE "浏览器页签标题"
+}
 
+prompt_icp_config() {
     local icp_default="${DMZ_ICP_NUMBER:-}"
+    local icp_input
     while true; do
         if [[ -n "$icp_default" ]]; then
             read -rp "请输入 ICP 备案号 [${icp_default}]（输入 - 清空）: " icp_input
@@ -194,7 +202,45 @@ prompt_config() {
         warn "ICP备案号格式不正确，请重新输入"
         icp_default=""
     done
+}
 
+confirm_config_group() {
+    local prompt="$1"
+    local answer
+    read -rp "$prompt [y/N]: " answer
+    [[ "${answer:-N}" =~ ^[Yy]$ ]]
+}
+
+prompt_config() {
+    if load_config; then
+        info "检测到已有部署配置: $(mask_domain "$DMZ_DOMAIN")"
+
+        if confirm_config_group "是否修改公网与 Caddy 配置？"; then
+            prompt_public_caddy_config
+        else
+            info "保留现有公网与 Caddy 配置"
+        fi
+
+        if confirm_config_group "是否修改页面标题配置？"; then
+            prompt_branding_config
+        else
+            info "保留现有页面标题配置"
+        fi
+
+        if confirm_config_group "是否修改备案配置？"; then
+            prompt_icp_config
+        else
+            info "保留现有备案配置"
+        fi
+
+        save_config
+        return 0
+    fi
+
+    info "未检测到部署配置，开始收集全部配置..."
+    prompt_public_caddy_config
+    prompt_branding_config
+    prompt_icp_config
     save_config
 }
 
