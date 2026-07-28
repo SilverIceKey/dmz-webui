@@ -21,7 +21,11 @@ BACKEND_DIR = os.path.join(PROJECT_ROOT, "backend")
 if BACKEND_DIR not in sys.path:
     sys.path.insert(0, BACKEND_DIR)
 
-from firewall import extract_named_block, replace_named_block  # noqa: E402
+from firewall import (  # noqa: E402
+    extract_named_block,
+    insert_lines_before_named_block_close,
+    upsert_named_block_in_parent,
+)
 
 PROJECT_NFT = "/opt/dmz-webui/configs/nftables.conf"
 RUNTIME_NFT = "/etc/nftables.conf"
@@ -65,35 +69,9 @@ def rule_key(r: dict):
 
 
 def insert_before_chain_close(text: str, chain_name: str, lines: list[str]) -> str:
-    if not lines:
-        return text
-    marker = f"chain {chain_name} {{"
-    idx = text.find(marker)
-    if idx == -1:
-        print(f"Warning: chain '{chain_name}' not found, skipping insertion", file=sys.stderr)
-        return text
-
-    # Find the opening brace of the chain block and match nested braces
-    open_idx = text.find("{", idx)
-    depth = 0
-    close_idx = -1
-    i = open_idx
-    while i < len(text):
-        ch = text[i]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                close_idx = i
-                break
-        i += 1
-
-    if close_idx == -1:
-        print(f"Warning: could not find end of chain '{chain_name}', skipping insertion", file=sys.stderr)
-        return text
-
-    return text[:close_idx] + "\n" + "\n".join(lines) + text[close_idx:]
+    return insert_lines_before_named_block_close(
+        text, f"chain {chain_name}", lines
+    )
 
 
 def extract_cn_ipv4_set(text: str) -> str | None:
@@ -115,17 +93,23 @@ def extract_cn_ipv4_set(text: str) -> str | None:
     }}"""
 
 
-def replace_or_insert_cn_ipv4_set(text: str, set_block: str | None) -> str:
+def sync_cn_ipv4_sets(text: str, set_block: str | None) -> str:
     if set_block is None:
         return text
-    match = re.search(r"(?m)^[ \t]*set\s+cn_ipv4\s*\{", text)
-    if match:
-        return replace_named_block(text, "set cn_ipv4", set_block)
-    # Insert before chain prerouting
-    idx = text.find("chain prerouting {")
-    if idx == -1:
-        return text
-    return text[:idx] + set_block + "\n\n" + text[idx:]
+    text = upsert_named_block_in_parent(
+        text,
+        "table inet dmz_webui_filter",
+        "set cn_ipv4",
+        set_block,
+        "chain input",
+    )
+    return upsert_named_block_in_parent(
+        text,
+        "table ip dmz_webui_nat",
+        "set cn_ipv4",
+        set_block,
+        "chain prerouting",
+    )
 
 
 def main():
@@ -154,8 +138,8 @@ def main():
     # Preserve cn_ipv4 set from runtime if populated
     cn_set_block = extract_cn_ipv4_set(runtime_text)
     if cn_set_block:
-        base_text = replace_or_insert_cn_ipv4_set(base_text, cn_set_block)
-        print("Preserved existing cn_ipv4 set")
+        base_text = sync_cn_ipv4_sets(base_text, cn_set_block)
+        print("Preserved existing cn_ipv4 sets")
 
     # Identify project base DNAT rules
     base_prerouting = extract_named_block(base_text, "chain prerouting") or ""
@@ -181,6 +165,18 @@ def main():
     if extra_lines:
         base_text = insert_before_chain_close(base_text, "prerouting", extra_lines)
         print(f"Preserved {len(extra_lines)} user-added DNAT rule(s)")
+
+    runtime_input = extract_named_block(runtime_text, "chain input") or ""
+    local_open_lines = [
+        line
+        for line in runtime_input.splitlines()
+        if re.search(r"#\s*local-open(?::.*)?\s*$", line)
+    ]
+    if local_open_lines:
+        base_text = insert_before_chain_close(
+            base_text, "input", local_open_lines
+        )
+        print(f"Preserved {len(local_open_lines)} local port rule(s)")
 
     # Load SSL proxy rules and re-apply them
     ssl_rules = []

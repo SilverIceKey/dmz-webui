@@ -20,7 +20,10 @@ flush ruleset
 
 table inet filter {
     set ssh_ports { type inet_service; elements = { 22 } }
-    chain input { type filter hook input priority filter; policy drop; }
+    chain input {
+        type filter hook input priority filter; policy drop;
+        ip saddr @cn_ipv4 tcp dport 19262 accept # local-open:Portainer
+    }
 }
 
 table ip nat {
@@ -45,6 +48,20 @@ table ip nat {
 
 
 class SyncMigrationTests(unittest.TestCase):
+    def test_inserted_rule_does_not_attach_to_chain_closing_brace(self):
+        config = (PROJECT_ROOT / "configs" / "nftables.conf").read_text()
+        line = (
+            "        ip saddr @cn_ipv4 tcp dport 19262 "
+            "dnat to 127.0.0.1:19262 # Portainer"
+        )
+
+        updated = sync_nftables.insert_before_chain_close(
+            config, "prerouting", [line]
+        )
+
+        self.assertIn(f"{line}\n    }}", updated)
+        self.assertNotIn(f"{line}}}", updated)
+
     def test_sync_migrates_project_data_without_copying_docker_chain(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -78,10 +95,19 @@ class SyncMigrationTests(unittest.TestCase):
             self.assertIn("table inet dmz_webui_filter", migrated)
             self.assertIn("table ip dmz_webui_nat", migrated)
             self.assertIn("elements = { 192.0.2.0/24 }", migrated)
+            self.assertEqual(
+                migrated.count("elements = { 192.0.2.0/24 }"),
+                2,
+            )
             self.assertIn(
                 "tcp dport 1000 dnat to 10.0.0.10:80 # user-rule", migrated
             )
             self.assertEqual(migrated.count("ssl-proxy:2000"), 2)
+            self.assertIn(
+                "ip saddr @cn_ipv4 tcp dport 19262 accept "
+                "# local-open:Portainer",
+                migrated,
+            )
             self.assertNotIn("chain DOCKER", migrated)
             self.assertNotIn("172.17.0.2:3000", migrated)
 

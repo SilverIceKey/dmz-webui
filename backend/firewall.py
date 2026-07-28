@@ -118,6 +118,105 @@ def _named_block_span(text: str, block_name: str) -> tuple[int, int] | None:
     return match.start(), closing + 1
 
 
+def _raw_named_block_close(
+    text: str, block_name: str
+) -> tuple[int, str] | None:
+    """Find a block close even when an old writer placed it after a # comment."""
+    match = re.search(
+        rf"(?m)^([ \t]*){re.escape(block_name)}\s*\{{",
+        text,
+    )
+    if not match:
+        return None
+
+    opening = text.find("{", match.start(), match.end())
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for index in range(opening, len(text)):
+        char = text[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in ('"', "'"):
+            quote = char
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index, match.group(1)
+    return None
+
+
+def normalize_named_block_closing_brace(text: str, block_name: str) -> str:
+    """Move a named block's closing brace to its own line when it is attached."""
+    match = re.search(
+        rf"(?m)^([ \t]*){re.escape(block_name)}\s*\{{",
+        text,
+    )
+    if not match:
+        return text
+
+    indentation = match.group(1)
+    opening = text.find("{", match.start(), match.end())
+    try:
+        parsed_closing = _matching_brace(text, opening)
+    except FirewallConfigError:
+        parsed_closing = -1
+
+    if parsed_closing != -1:
+        parsed_line_start = text.rfind("\n", 0, parsed_closing) + 1
+        parsed_prefix = text[parsed_line_start:parsed_closing]
+        if parsed_prefix == indentation:
+            return text
+        if parsed_prefix.strip():
+            closing = parsed_closing
+        else:
+            located = _raw_named_block_close(text, block_name)
+            if located is None:
+                return text
+            closing, indentation = located
+    else:
+        located = _raw_named_block_close(text, block_name)
+        if located is None:
+            return text
+        closing, indentation = located
+
+    line_start = text.rfind("\n", 0, closing) + 1
+    if not text[line_start:closing].strip():
+        return text
+    return text[:closing] + "\n" + indentation + text[closing:]
+
+
+def insert_lines_before_named_block_close(
+    text: str, block_name: str, lines: Iterable[str]
+) -> str:
+    """Insert complete lines before a named block's independently formatted close."""
+    rendered_lines = list(lines)
+    if not rendered_lines:
+        return text
+
+    normalized = normalize_named_block_closing_brace(text, block_name)
+    span = _named_block_span(normalized, block_name)
+    if span is None:
+        return text
+    _, end = span
+    closing = end - 1
+    line_start = normalized.rfind("\n", 0, closing) + 1
+    return (
+        normalized[:line_start]
+        + "\n".join(rendered_lines)
+        + "\n"
+        + normalized[line_start:]
+    )
+
+
 def extract_named_block(text: str, block_name: str) -> str | None:
     """Extract one named nftables block without crossing nested braces."""
     span = _named_block_span(text, block_name)
@@ -134,6 +233,45 @@ def replace_named_block(text: str, block_name: str, replacement: str) -> str:
         return text
     start, end = span
     return text[:start] + replacement + text[end:]
+
+
+def upsert_named_block_in_parent(
+    text: str,
+    parent_name: str,
+    block_name: str,
+    replacement: str,
+    before_block_name: str,
+) -> str:
+    """Replace or insert a named block inside one explicitly named parent."""
+    parent_span = _named_block_span(text, parent_name)
+    if parent_span is None:
+        return text
+    parent_start, parent_end = parent_span
+    parent_text = text[parent_start:parent_end]
+
+    child_span = _named_block_span(parent_text, block_name)
+    if child_span is not None:
+        child_start, child_end = child_span
+        updated_parent = (
+            parent_text[:child_start]
+            + replacement
+            + parent_text[child_end:]
+        )
+    else:
+        before_match = re.search(
+            rf"(?m)^[ \t]*{re.escape(before_block_name)}\s*\{{",
+            parent_text,
+        )
+        if not before_match:
+            return text
+        updated_parent = (
+            parent_text[:before_match.start()]
+            + replacement
+            + "\n\n"
+            + parent_text[before_match.start():]
+        )
+
+    return text[:parent_start] + updated_parent + text[parent_end:]
 
 
 def _run_nft(

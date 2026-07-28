@@ -1,3 +1,4 @@
+import ipaddress
 import os
 import re
 import subprocess
@@ -18,7 +19,12 @@ from pydantic import BaseModel, field_validator, model_validator
 import jwt
 import pam
 
-from firewall import apply_owned_rules, replace_named_block
+from firewall import (
+    apply_owned_rules,
+    insert_lines_before_named_block_close,
+    normalize_named_block_closing_brace,
+    upsert_named_block_in_parent,
+)
 
 app = FastAPI(title="DMZ WebUI")
 
@@ -70,24 +76,19 @@ class LoginRequest(BaseModel):
 class TokenResponse(BaseModel):
     token: str
 
-class NfRule(BaseModel):
-    id: int
+class PortRuleBase(BaseModel):
     port: int
-    protocol: str
-    dest_ip: str
-    dest_port: int
+    protocol: str = "both"
     comment: Optional[str] = ""
     whitelist_type: str = "all"
     whitelist_ips: Optional[str] = ""
 
-class NfRuleCreate(BaseModel):
-    port: int
-    protocol: str = "both"
-    dest_ip: str
-    dest_port: int
-    comment: Optional[str] = ""
-    whitelist_type: str = "all"
-    whitelist_ips: Optional[str] = ""
+    @field_validator("port")
+    @classmethod
+    def validate_port(cls, v: int) -> int:
+        if not 1 <= v <= 65535:
+            raise ValueError("port must be between 1 and 65535")
+        return v
 
     @field_validator("protocol")
     @classmethod
@@ -105,11 +106,58 @@ class NfRuleCreate(BaseModel):
             raise ValueError("whitelist_type must be all, cn, abroad, or custom")
         return v
 
+    @field_validator("comment")
+    @classmethod
+    def validate_comment(cls, v: Optional[str]) -> Optional[str]:
+        if v and ("\n" in v or "\r" in v):
+            raise ValueError("comment must be a single line")
+        return v
+
     @model_validator(mode="after")
     def validate_custom_whitelist(self):
-        if self.whitelist_type == "custom" and not (self.whitelist_ips or "").strip():
-            raise ValueError("whitelist_ips is required when whitelist_type is custom")
+        if self.whitelist_type != "custom":
+            return self
+        values = [
+            item.strip()
+            for item in (self.whitelist_ips or "").replace(";", ",").split(",")
+            if item.strip()
+        ]
+        if not values:
+            raise ValueError(
+                "whitelist_ips is required when whitelist_type is custom"
+            )
+        for value in values:
+            try:
+                network = ipaddress.ip_network(value, strict=False)
+            except ValueError as error:
+                raise ValueError(
+                    f"invalid whitelist IPv4/CIDR: {value}"
+                ) from error
+            if network.version != 4:
+                raise ValueError(
+                    f"whitelist only supports IPv4: {value}"
+                )
         return self
+
+
+class NfRule(PortRuleBase):
+    id: int
+    dest_ip: str
+    dest_port: int
+
+
+class NfRuleCreate(PortRuleBase):
+    dest_ip: str
+    dest_port: int
+
+
+class LocalPortRule(PortRuleBase):
+    id: int
+
+
+class LocalPortRuleCreate(PortRuleBase):
+    pass
+
 
 class SslProxyRule(BaseModel):
     id: int
@@ -327,23 +375,7 @@ def _parse_nft_rules(text: str) -> List[NfRule]:
         if comment.startswith("ssl-proxy"):
             continue
 
-        if whitelist_match:
-            if "!=" in whitelist_match:
-                whitelist_type = "abroad"
-                whitelist_ips = ""
-            elif "@cn_ipv4" in whitelist_match:
-                whitelist_type = "cn"
-                whitelist_ips = ""
-            elif "{" in whitelist_match:
-                whitelist_type = "custom"
-                ips_m = re.search(r'\{([^}]*)\}', whitelist_match)
-                whitelist_ips = ips_m.group(1).strip() if ips_m else ""
-            else:
-                whitelist_type = "all"
-                whitelist_ips = ""
-        else:
-            whitelist_type = "all"
-            whitelist_ips = ""
+        whitelist_type, whitelist_ips = _parse_whitelist(whitelist_match)
 
         raw_rules.append({
             "protocol": protocol, "port": port, "dest_ip": dest_ip, "dest_port": dest_port,
@@ -369,6 +401,55 @@ def _parse_nft_rules(text: str) -> List[NfRule]:
         ))
     return rules
 
+
+def _parse_whitelist(
+    whitelist_match: Optional[str],
+) -> tuple[str, str]:
+    if not whitelist_match:
+        return "all", ""
+    if "!=" in whitelist_match:
+        return "abroad", ""
+    if "@cn_ipv4" in whitelist_match:
+        return "cn", ""
+    if "{" in whitelist_match:
+        ips_match = re.search(r"\{([^}]*)\}", whitelist_match)
+        return "custom", ips_match.group(1).strip() if ips_match else ""
+    return "all", ""
+
+
+def _parse_local_port_rules(text: str) -> List[LocalPortRule]:
+    pattern = (
+        r"^\s*(?:(ip\s+saddr\s+(?:!=\s+)?(?:@cn_ipv4|\{[^}]*\})\s+))?"
+        r"(tcp|udp)\s+dport\s+(\d+)\s+accept\s+"
+        r"#\s*local-open(?::(.*))?\s*$"
+    )
+    grouped: dict[tuple[int, str, str, str], set[str]] = {}
+    for match in re.finditer(pattern, text, re.MULTILINE):
+        whitelist_type, whitelist_ips = _parse_whitelist(match.group(1))
+        key = (
+            int(match.group(3)),
+            whitelist_type,
+            whitelist_ips,
+            (match.group(4) or "").strip(),
+        )
+        grouped.setdefault(key, set()).add(match.group(2))
+
+    rules = []
+    for index, key in enumerate(sorted(grouped), 1):
+        port, whitelist_type, whitelist_ips, comment = key
+        protocols = grouped[key]
+        protocol = "both" if protocols == {"tcp", "udp"} else next(iter(protocols))
+        rules.append(LocalPortRule(
+            id=index,
+            port=port,
+            protocol=protocol,
+            whitelist_type=whitelist_type,
+            whitelist_ips=whitelist_ips,
+            comment=comment,
+        ))
+    return rules
+
+
 def _add_nft_rule(text: str, rule: NfRuleCreate) -> str:
     protocols = ["tcp", "udp"] if rule.protocol == "both" else [rule.protocol]
     prefix = _build_whitelist_prefix(rule.whitelist_type, rule.whitelist_ips or "")
@@ -378,15 +459,29 @@ def _add_nft_rule(text: str, rule: NfRuleCreate) -> str:
         if rule.comment:
             line += f" # {rule.comment}"
         lines.append(line)
-    idx = text.find("chain prerouting {")
-    if idx == -1:
-        return text
-    close_idx = text.find("\n    }", idx + len("chain prerouting {"))
-    if close_idx == -1:
-        return text
-    return text[:close_idx] + "\n" + "\n".join(lines) + text[close_idx:]
+    return insert_lines_before_named_block_close(
+        text, "chain prerouting", lines
+    )
+
+
+def _add_local_port_rule(text: str, rule: LocalPortRuleCreate) -> str:
+    protocols = ["tcp", "udp"] if rule.protocol == "both" else [rule.protocol]
+    prefix = _build_whitelist_prefix(
+        rule.whitelist_type, rule.whitelist_ips or ""
+    )
+    marker = "# local-open"
+    if rule.comment:
+        marker += f":{rule.comment}"
+    lines = [
+        f"        {prefix}{protocol} dport {rule.port} accept {marker}"
+        for protocol in protocols
+    ]
+    return insert_lines_before_named_block_close(text, "chain input", lines)
+
 
 def _remove_nft_rule(text: str, port: int, protocol: str, dest_ip: str, dest_port: int) -> str:
+    text = normalize_named_block_closing_brace(text, "chain prerouting")
+    had_trailing_newline = text.endswith("\n")
     protocols = ["tcp", "udp"] if protocol == "both" else [protocol]
     lines = text.splitlines()
     new_lines = []
@@ -398,31 +493,46 @@ def _remove_nft_rule(text: str, port: int, protocol: str, dest_ip: str, dest_por
                 break
         if not skip:
             new_lines.append(line)
-    return "\n".join(new_lines)
+    result = "\n".join(new_lines)
+    return result + ("\n" if had_trailing_newline else "")
+
+
+def _remove_local_port_rule(
+    text: str, port: int, protocol: str
+) -> str:
+    text = normalize_named_block_closing_brace(text, "chain input")
+    had_trailing_newline = text.endswith("\n")
+    protocols = ["tcp", "udp"] if protocol == "both" else [protocol]
+    pattern = re.compile(
+        rf"^\s*(?:ip\s+saddr\s+(?:!=\s+)?(?:@cn_ipv4|\{{[^}}]*\}})\s+)?"
+        rf"(?:{'|'.join(re.escape(item) for item in protocols)})\s+"
+        rf"dport\s+{port}\s+accept\s+#\s*local-open(?::.*)?\s*$"
+    )
+    kept_lines = [line for line in text.splitlines() if not pattern.search(line)]
+    result = "\n".join(kept_lines)
+    return result + ("\n" if had_trailing_newline else "")
+
 
 def _remove_ssl_proxy_nft_rules(text: str) -> str:
     """移除所有由 SSL 代理页面管理的 nftables 规则（input / prerouting 中的标记行）。"""
+    text = normalize_named_block_closing_brace(text, "chain input")
+    text = normalize_named_block_closing_brace(text, "chain prerouting")
+    had_trailing_newline = text.endswith("\n")
     lines = text.splitlines()
     new_lines = []
     for line in lines:
         if re.search(r"#\s*ssl-proxy:\d+", line):
             continue
         new_lines.append(line)
-    return "\n".join(new_lines)
+    result = "\n".join(new_lines)
+    return result + ("\n" if had_trailing_newline else "")
 
 
 def _insert_into_chain(text: str, chain_name: str, new_lines: List[str]) -> str:
     """在指定 chain 的结束 '}' 前插入新行。"""
-    if not new_lines:
-        return text
-    marker = f"chain {chain_name} {{"
-    idx = text.find(marker)
-    if idx == -1:
-        return text
-    close_idx = text.find("\n    }", idx + len(marker))
-    if close_idx == -1:
-        return text
-    return text[:close_idx] + "\n" + "\n".join(new_lines) + text[close_idx:]
+    return insert_lines_before_named_block_close(
+        text, f"chain {chain_name}", new_lines
+    )
 
 def _build_ssl_proxy_nftables(rules: List[dict]) -> str:
     text = _read_nftables()
@@ -484,7 +594,12 @@ def _apply_ssl_proxy_rules(rules: List[dict]):
             print(f"[dmz-webui] SSL proxy rollback errors: {'; '.join(rollback_errors)}")
         raise
 
-def _check_port_conflict(port: int, exclude_rule_id: Optional[int] = None):
+def _check_port_conflict(
+    port: int,
+    exclude_rule_id: Optional[int] = None,
+    exclude_forward: Optional[tuple[str, int, str, int]] = None,
+    exclude_local: Optional[tuple[str, int]] = None,
+):
     """检查端口是否和 WebUI、现有 SSL 代理规则或防火墙规则冲突。"""
     if port == DMZ_CADDY_PORT:
         raise HTTPException(status_code=400, detail=f"Port {DMZ_CADDY_PORT} is reserved for WebUI")
@@ -496,15 +611,55 @@ def _check_port_conflict(port: int, exclude_rule_id: Optional[int] = None):
         if r["port"] == port:
             raise HTTPException(status_code=400, detail=f"Port {port} is already used by SSL proxy rules")
 
-    # Check firewall rules (ignore ssl-proxy managed rules)
     nft_text = _read_nftables()
-    if re.search(rf"^\s*(?:ip\s+saddr\s+(?:!=\s+)?(?:@cn_ipv4|\{{[^}}]*\}})\s+)?\s*(?:tcp|udp)\s+dport\s+{port}\s+dnat\s+to", nft_text, re.MULTILINE):
-        # make sure it's not a ssl-proxy rule line
-        for line in nft_text.splitlines():
-            if re.search(rf"\s+dnat\s+to\s+[0-9.]+:\d+.*#\s*ssl-proxy:{port}", line):
-                continue
-            if re.search(rf"\s*(?:tcp|udp)\s+dport\s+{port}\s+dnat\s+to", line):
-                raise HTTPException(status_code=400, detail=f"Port {port} is already used by firewall rules")
+    for line in nft_text.splitlines():
+        port_match = re.search(
+            rf"\b(tcp|udp)\s+dport\s+{port}\b", line
+        )
+        if not port_match:
+            continue
+        protocol = port_match.group(1)
+        if re.search(rf"#\s*ssl-proxy:{port}\b", line):
+            continue
+        if "# local-open" in line:
+            if exclude_local:
+                old_protocol, old_port = exclude_local
+                excluded_protocols = (
+                    {"tcp", "udp"} if old_protocol == "both"
+                    else {old_protocol}
+                )
+                if old_port == port and protocol in excluded_protocols:
+                    continue
+            raise HTTPException(
+                status_code=400,
+                detail=f"Port {port} is already used by local port rules",
+            )
+        dnat_match = re.search(
+            r"\bdnat\s+to\s+([0-9.]+):(\d+)", line
+        )
+        if dnat_match:
+            if exclude_forward:
+                old_protocol, old_port, old_dest_ip, old_dest_port = exclude_forward
+                excluded_protocols = (
+                    {"tcp", "udp"} if old_protocol == "both"
+                    else {old_protocol}
+                )
+                if (
+                    old_port == port
+                    and protocol in excluded_protocols
+                    and dnat_match.group(1) == old_dest_ip
+                    and int(dnat_match.group(2)) == old_dest_port
+                ):
+                    continue
+            raise HTTPException(
+                status_code=400,
+                detail=f"Port {port} is already used by forwarding rules",
+            )
+        if re.search(r"\baccept\b", line):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Port {port} is already allowed by system firewall rules",
+            )
 
 def _update_cn_ipset() -> bool:
     try:
@@ -564,12 +719,20 @@ def _update_cn_ipset() -> bool:
         elements = {{ {', '.join(cidrs)} }}
     }}"""
 
-        if 'set cn_ipv4 {' in text:
-            text = replace_named_block(text, "set cn_ipv4", set_block)
-        else:
-            idx = text.find('chain prerouting {')
-            if idx != -1:
-                text = text[:idx] + set_block + '\n\n' + text[idx:]
+        text = upsert_named_block_in_parent(
+            text,
+            "table inet dmz_webui_filter",
+            "set cn_ipv4",
+            set_block,
+            "chain input",
+        )
+        text = upsert_named_block_in_parent(
+            text,
+            "table ip dmz_webui_nat",
+            "set cn_ipv4",
+            set_block,
+            "chain prerouting",
+        )
 
         _commit_nftables(text)
         return True
@@ -584,6 +747,7 @@ def get_nft_rules(_: str = Depends(verify_token)):
 
 @app.post("/api/nftables/rules")
 def create_nft_rule(rule: NfRuleCreate, _: str = Depends(verify_token)):
+    _check_port_conflict(rule.port)
     text = _read_nftables()
     text = _add_nft_rule(text, rule)
     _commit_nftables(text)
@@ -593,6 +757,10 @@ def create_nft_rule(rule: NfRuleCreate, _: str = Depends(verify_token)):
 def edit_nft_rule(protocol: str, port: int, old_dest_ip: str = Query(...), old_dest_port: int = Query(...), rule: NfRuleCreate = ..., _: str = Depends(verify_token)):
     if rule.port != port:
         raise HTTPException(status_code=400, detail="Port cannot be changed")
+    _check_port_conflict(
+        rule.port,
+        exclude_forward=(protocol, port, old_dest_ip, old_dest_port),
+    )
     text = _read_nftables()
     text = _remove_nft_rule(text, port, protocol, old_dest_ip, old_dest_port)
     text = _add_nft_rule(text, rule)
@@ -605,6 +773,53 @@ def delete_nft_rule(protocol: str, port: int, dest_ip: str = Query(...), dest_po
     text = _remove_nft_rule(text, port, protocol, dest_ip, dest_port)
     _commit_nftables(text)
     return {"ok": True}
+
+
+@app.get("/api/nftables/open-ports", response_model=List[LocalPortRule])
+def get_local_port_rules(_: str = Depends(verify_token)):
+    return _parse_local_port_rules(_read_nftables())
+
+
+@app.post("/api/nftables/open-ports")
+def create_local_port_rule(
+    rule: LocalPortRuleCreate, _: str = Depends(verify_token)
+):
+    _check_port_conflict(rule.port)
+    text = _add_local_port_rule(_read_nftables(), rule)
+    _commit_nftables(text)
+    return {"ok": True}
+
+
+@app.put("/api/nftables/open-ports/{protocol}/{port}")
+def edit_local_port_rule(
+    protocol: str,
+    port: int,
+    rule: LocalPortRuleCreate,
+    _: str = Depends(verify_token),
+):
+    if rule.port != port:
+        raise HTTPException(status_code=400, detail="Port cannot be changed")
+    _check_port_conflict(
+        rule.port,
+        exclude_local=(protocol, port),
+    )
+    text = _read_nftables()
+    text = _remove_local_port_rule(text, port, protocol)
+    text = _add_local_port_rule(text, rule)
+    _commit_nftables(text)
+    return {"ok": True}
+
+
+@app.delete("/api/nftables/open-ports/{protocol}/{port}")
+def delete_local_port_rule(
+    protocol: str,
+    port: int,
+    _: str = Depends(verify_token),
+):
+    text = _remove_local_port_rule(_read_nftables(), port, protocol)
+    _commit_nftables(text)
+    return {"ok": True}
+
 
 @app.post("/api/nftables/update-cn-ipset")
 def update_cn_ipset(_: str = Depends(verify_token)):

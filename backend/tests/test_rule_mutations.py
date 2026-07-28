@@ -176,6 +176,188 @@ class EndpointMutationTests(unittest.TestCase):
         commit.assert_called_once_with("new nftables")
         self.assertEqual(result, {"ok": True})
 
+    def test_nft_edit_repairs_legacy_rule_attached_to_closing_brace(self):
+        config = (BACKEND_DIR.parent / "configs" / "nftables.conf").read_text()
+        malformed = config.replace(
+            "\n    chain postrouting {",
+            "\n"
+            "        ip saddr @cn_ipv4 tcp dport 19262 "
+            "dnat to 127.0.0.1:19262 # Portainer}\n"
+            "\n    chain postrouting {",
+        ).replace(
+            "\n    }\n\n"
+            "        ip saddr @cn_ipv4 tcp dport 19262",
+            "\n"
+            "        ip saddr @cn_ipv4 tcp dport 19262",
+            1,
+        )
+        replacement = main.NfRuleCreate(
+            port=19262,
+            protocol="tcp",
+            dest_ip="127.0.0.1",
+            dest_port=19262,
+            whitelist_type="cn",
+            comment="Portainer updated",
+        )
+
+        removed = main._remove_nft_rule(
+            malformed, 19262, "tcp", "127.0.0.1", 19262
+        )
+        updated = main._add_nft_rule(removed, replacement)
+
+        self.assertIn("# Portainer updated\n    }", updated)
+        self.assertNotIn("# Portainer updated}", updated)
+        self.assertIsNotNone(extract_named_block(updated, "chain prerouting"))
+
+    def test_local_open_rule_round_trip_preserves_fixed_input_rules(self):
+        config = (BACKEND_DIR.parent / "configs" / "nftables.conf").read_text()
+        rule = main.LocalPortRuleCreate(
+            port=19262,
+            protocol="both",
+            whitelist_type="cn",
+            comment="Portainer",
+        )
+
+        added = main._add_local_port_rule(config, rule)
+        parsed = main._parse_local_port_rules(added)
+        removed = main._remove_local_port_rule(added, 19262, "both")
+
+        self.assertIn(
+            "ip saddr @cn_ipv4 tcp dport 19262 accept # local-open:Portainer",
+            added,
+        )
+        self.assertIn(
+            "ip saddr @cn_ipv4 udp dport 19262 accept # local-open:Portainer",
+            added,
+        )
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0].protocol, "both")
+        self.assertEqual(parsed[0].whitelist_type, "cn")
+        self.assertEqual(parsed[0].comment, "Portainer")
+        self.assertNotIn("local-open", removed)
+        self.assertIn("tcp dport @ssh_ports accept", removed)
+        self.assertIn("tcp dport 5000 accept", removed)
+        self.assertIn("tcp dport 8443 accept", removed)
+
+    def test_local_open_validates_custom_ipv4_whitelist_and_comment(self):
+        valid = main.LocalPortRuleCreate(
+            port=19262,
+            protocol="tcp",
+            whitelist_type="custom",
+            whitelist_ips="192.0.2.1, 198.51.100.0/24",
+        )
+        self.assertEqual(valid.whitelist_type, "custom")
+
+        with self.assertRaisesRegex(ValueError, "invalid whitelist"):
+            main.LocalPortRuleCreate(
+                port=19262,
+                protocol="tcp",
+                whitelist_type="custom",
+                whitelist_ips="192.0.2.1 } tcp dport 22 accept",
+            )
+
+        with self.assertRaisesRegex(ValueError, "single line"):
+            main.LocalPortRuleCreate(
+                port=19262,
+                protocol="tcp",
+                comment="first line\nsecond line",
+            )
+
+    @patch.object(main, "_commit_nftables")
+    @patch.object(main, "_read_nftables")
+    def test_local_open_create_commits_input_rule(self, read_nftables, commit):
+        read_nftables.return_value = (
+            BACKEND_DIR.parent / "configs" / "nftables.conf"
+        ).read_text()
+        rule = main.LocalPortRuleCreate(
+            port=19262,
+            protocol="tcp",
+            whitelist_type="all",
+            comment="Portainer",
+        )
+
+        result = main.create_local_port_rule(rule, "tester")
+
+        committed = commit.call_args.args[0]
+        input_chain = extract_named_block(committed, "chain input")
+        prerouting_chain = extract_named_block(committed, "chain prerouting")
+        self.assertEqual(result, {"ok": True})
+        self.assertIn("tcp dport 19262 accept # local-open:Portainer", input_chain)
+        self.assertNotIn("19262", prerouting_chain)
+
+    def test_local_open_rejects_port_used_by_forwarding(self):
+        config = (BACKEND_DIR.parent / "configs" / "nftables.conf").read_text()
+        config = main._add_nft_rule(
+            config,
+            main.NfRuleCreate(
+                port=19262,
+                protocol="tcp",
+                dest_ip="10.0.0.10",
+                dest_port=80,
+            ),
+        )
+        rule = main.LocalPortRuleCreate(port=19262, protocol="tcp")
+
+        with patch.object(main, "_read_nftables", return_value=config):
+            with self.assertRaises(HTTPException) as raised:
+                main.create_local_port_rule(rule, "tester")
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertIn("forwarding", raised.exception.detail.lower())
+
+    def test_forwarding_rejects_port_used_by_local_open(self):
+        config = (BACKEND_DIR.parent / "configs" / "nftables.conf").read_text()
+        config = main._add_local_port_rule(
+            config,
+            main.LocalPortRuleCreate(port=19262, protocol="tcp"),
+        )
+        rule = main.NfRuleCreate(
+            port=19262,
+            protocol="tcp",
+            dest_ip="10.0.0.10",
+            dest_port=80,
+        )
+
+        with patch.object(main, "_read_nftables", return_value=config):
+            with self.assertRaises(HTTPException) as raised:
+                main.create_nft_rule(rule, "tester")
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertIn("local", raised.exception.detail.lower())
+
+    @patch.object(main, "_commit_nftables")
+    @patch.object(main, "_read_nftables")
+    def test_cn_update_populates_filter_and_nat_sets(
+        self, read_nftables, commit
+    ):
+        read_nftables.return_value = (
+            BACKEND_DIR.parent / "configs" / "nftables.conf"
+        ).read_text()
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b"1.0.1.0/24\n"
+
+        with patch("urllib.request.urlopen", return_value=FakeResponse()):
+            self.assertTrue(main._update_cn_ipset())
+
+        committed = commit.call_args.args[0]
+        filter_table = extract_named_block(
+            committed, "table inet dmz_webui_filter"
+        )
+        nat_table = extract_named_block(
+            committed, "table ip dmz_webui_nat"
+        )
+        for table in (filter_table, nat_table):
+            self.assertIn("1.0.1.0/24", table)
+            self.assertIn("10.0.0.0/8", table)
+
 
 if __name__ == "__main__":
     unittest.main()

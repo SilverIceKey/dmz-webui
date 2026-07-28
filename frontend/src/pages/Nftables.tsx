@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { nftables } from '../utils/api';
-import type { NfRule } from '../types';
+import type { LocalPortRule, NfRule } from '../types';
 
 function Navbar() {
   const logout = () => {
@@ -36,6 +36,7 @@ const WL_LABELS: Record<string, string> = {
 };
 
 interface RuleFormData {
+  rule_type: 'forward' | 'local';
   protocol: string;
   port: string;
   dest_ip: string;
@@ -46,6 +47,7 @@ interface RuleFormData {
 }
 
 const emptyForm: RuleFormData = {
+  rule_type: 'forward',
   protocol: 'both',
   port: '',
   dest_ip: '',
@@ -54,6 +56,10 @@ const emptyForm: RuleFormData = {
   whitelist_type: 'all',
   whitelist_ips: '',
 };
+
+type FirewallRule =
+  | (NfRule & { rule_type: 'forward' })
+  | (LocalPortRule & { rule_type: 'local' });
 
 function RuleModal({
   open,
@@ -64,7 +70,7 @@ function RuleModal({
   open: boolean;
   onClose: () => void;
   onSave: (data: RuleFormData) => void;
-  initial: NfRule | null;
+  initial: FirewallRule | null;
 }) {
   const [form, setForm] = useState<RuleFormData>(emptyForm);
   const [saving, setSaving] = useState(false);
@@ -72,10 +78,11 @@ function RuleModal({
   useEffect(() => {
     if (initial) {
       setForm({
+        rule_type: initial.rule_type,
         protocol: initial.protocol,
         port: String(initial.port),
-        dest_ip: initial.dest_ip,
-        dest_port: String(initial.dest_port),
+        dest_ip: initial.rule_type === 'forward' ? initial.dest_ip : '',
+        dest_port: initial.rule_type === 'forward' ? String(initial.dest_port) : '',
         comment: initial.comment || '',
         whitelist_type: initial.whitelist_type,
         whitelist_ips: initial.whitelist_ips || '',
@@ -108,6 +115,20 @@ function RuleModal({
         </div>
         <form onSubmit={handleSubmit}>
           <div className="form-group">
+            <label>规则类型</label>
+            <select
+              value={form.rule_type}
+              disabled={isEdit}
+              onChange={(e) => setForm({
+                ...form,
+                rule_type: e.target.value as RuleFormData['rule_type'],
+              })}
+            >
+              <option value="forward">端口转发</option>
+              <option value="local">本机端口开放</option>
+            </select>
+          </div>
+          <div className="form-group">
             <label>协议</label>
             <select value={form.protocol} onChange={(e) => setForm({ ...form, protocol: e.target.value })}>
               <option value="tcp">TCP</option>
@@ -119,14 +140,18 @@ function RuleModal({
             <label>外部端口</label>
             <input type="number" value={form.port} disabled={isEdit} onChange={(e) => setForm({ ...form, port: e.target.value })} required />
           </div>
-          <div className="form-group">
-            <label>目标 IP</label>
-            <input value={form.dest_ip} onChange={(e) => setForm({ ...form, dest_ip: e.target.value })} placeholder="192.168.x.x" required />
-          </div>
-          <div className="form-group">
-            <label>目标端口</label>
-            <input type="number" value={form.dest_port} onChange={(e) => setForm({ ...form, dest_port: e.target.value })} required />
-          </div>
+          {form.rule_type === 'forward' && (
+            <>
+              <div className="form-group">
+                <label>目标 IP</label>
+                <input value={form.dest_ip} onChange={(e) => setForm({ ...form, dest_ip: e.target.value })} placeholder="192.168.x.x" required />
+              </div>
+              <div className="form-group">
+                <label>目标端口</label>
+                <input type="number" value={form.dest_port} onChange={(e) => setForm({ ...form, dest_port: e.target.value })} required />
+              </div>
+            </>
+          )}
           <div className="form-group">
             <label>白名单</label>
             <select value={form.whitelist_type} onChange={(e) => setForm({ ...form, whitelist_type: e.target.value })}>
@@ -164,16 +189,29 @@ function RuleModal({
 }
 
 export default function NftablesPage() {
-  const [rules, setRules] = useState<NfRule[]>([]);
+  const [rules, setRules] = useState<FirewallRule[]>([]);
+  const [typeFilter, setTypeFilter] = useState('all');
   const [filter, setFilter] = useState('all');
   const [modalOpen, setModalOpen] = useState(false);
-  const [editingRule, setEditingRule] = useState<NfRule | null>(null);
+  const [editingRule, setEditingRule] = useState<FirewallRule | null>(null);
   const [updatingCn, setUpdatingCn] = useState(false);
 
   const fetchRules = async () => {
     try {
-      const res = await nftables.list();
-      setRules(res.data);
+      const [forwardResponse, localResponse] = await Promise.all([
+        nftables.list(),
+        nftables.listOpenPorts(),
+      ]);
+      setRules([
+        ...forwardResponse.data.map((rule: NfRule) => ({
+          ...rule,
+          rule_type: 'forward' as const,
+        })),
+        ...localResponse.data.map((rule: LocalPortRule) => ({
+          ...rule,
+          rule_type: 'local' as const,
+        })),
+      ]);
     } catch (e) {
       console.error(e);
     }
@@ -183,30 +221,49 @@ export default function NftablesPage() {
     fetchRules();
   }, []);
 
-  const filteredRules = rules.filter((r) => filter === 'all' || r.protocol === filter);
+  const filteredRules = rules.filter(
+    (rule) =>
+      (typeFilter === 'all' || rule.rule_type === typeFilter)
+      && (filter === 'all' || rule.protocol === filter)
+  );
 
   const handleSave = async (form: RuleFormData) => {
-    const data = {
+    const commonData = {
       port: parseInt(form.port),
       protocol: form.protocol,
-      dest_ip: form.dest_ip,
-      dest_port: parseInt(form.dest_port),
       comment: form.comment,
       whitelist_type: form.whitelist_type,
       whitelist_ips: form.whitelist_ips,
     };
 
     try {
-      if (editingRule) {
-        await nftables.edit(
-          editingRule.protocol,
-          editingRule.port,
-          editingRule.dest_ip,
-          editingRule.dest_port,
-          data
-        );
+      if (form.rule_type === 'local') {
+        if (editingRule?.rule_type === 'local') {
+          await nftables.editOpenPort(
+            editingRule.protocol,
+            editingRule.port,
+            commonData
+          );
+        } else {
+          await nftables.createOpenPort(commonData);
+        }
       } else {
-        await nftables.create(data);
+        const forwardData = {
+          ...commonData,
+          dest_ip: form.dest_ip,
+          dest_port: parseInt(form.dest_port),
+        };
+        if (editingRule?.rule_type === 'forward') {
+          await nftables.edit(
+            editingRule.protocol,
+            editingRule.port,
+            editingRule.dest_ip,
+            editingRule.dest_port,
+            forwardData
+          );
+        } else {
+          await nftables.create(forwardData);
+        }
       }
       setModalOpen(false);
       setEditingRule(null);
@@ -216,11 +273,23 @@ export default function NftablesPage() {
     }
   };
 
-  const handleDelete = async (rule: NfRule) => {
+  const handleDelete = async (rule: FirewallRule) => {
     const protoDisplay = rule.protocol === 'both' ? 'TCP/UDP' : rule.protocol.toUpperCase();
-    if (!confirm(`确定删除 ${protoDisplay}:${rule.port} → ${rule.dest_ip}:${rule.dest_port} 的规则？`)) return;
+    const description = rule.rule_type === 'forward'
+      ? `${protoDisplay}:${rule.port} → ${rule.dest_ip}:${rule.dest_port} 的端口转发`
+      : `${protoDisplay}:${rule.port} 的本机开放`;
+    if (!confirm(`确定删除 ${description} 规则？`)) return;
     try {
-      await nftables.remove(rule.protocol, rule.port, rule.dest_ip, rule.dest_port);
+      if (rule.rule_type === 'forward') {
+        await nftables.remove(
+          rule.protocol,
+          rule.port,
+          rule.dest_ip,
+          rule.dest_port
+        );
+      } else {
+        await nftables.removeOpenPort(rule.protocol, rule.port);
+      }
       fetchRules();
     } catch (e: any) {
       alert('删除失败: ' + (e.response?.data?.detail || e.message));
@@ -232,7 +301,7 @@ export default function NftablesPage() {
     setModalOpen(true);
   };
 
-  const openEdit = (rule: NfRule) => {
+  const openEdit = (rule: FirewallRule) => {
     setEditingRule(rule);
     setModalOpen(true);
   };
@@ -255,13 +324,34 @@ export default function NftablesPage() {
       <Navbar />
       <div className="container">
         <div className="page-header">
-          <h1>防火墙端口转发</h1>
+          <h1>防火墙规则</h1>
           <div className="page-actions">
             <button className="btn btn-secondary" onClick={handleUpdateCn} disabled={updatingCn}>
               {updatingCn ? '更新中...' : '更新大陆 IP'}
             </button>
             <button className="btn btn-primary" onClick={openAdd}>+ 添加规则</button>
           </div>
+        </div>
+
+        <div className="info-banner">
+          端口转发用于将流量 DNAT 到其他地址；本机端口开放用于允许外部访问
+          监听在本机网卡上的服务。两种类型均支持大陆、境外和自定义来源白名单。
+        </div>
+
+        <div className="filter-bar">
+          {[
+            { value: 'all', label: '全部类型' },
+            { value: 'forward', label: '端口转发' },
+            { value: 'local', label: '本机开放' },
+          ].map((option) => (
+            <button
+              key={option.value}
+              className={`filter-pill ${typeFilter === option.value ? 'active' : ''}`}
+              onClick={() => setTypeFilter(option.value)}
+            >
+              {option.label}
+            </button>
+          ))}
         </div>
 
         <div className="filter-bar">
@@ -278,12 +368,22 @@ export default function NftablesPage() {
 
         <div className="cards-grid">
           {filteredRules.map((r) => (
-            <div className="card rule-card" key={`${r.protocol}-${r.port}-${r.dest_ip}-${r.dest_port}`}>
+            <div
+              className="card rule-card"
+              key={
+                r.rule_type === 'forward'
+                  ? `forward-${r.protocol}-${r.port}-${r.dest_ip}-${r.dest_port}`
+                  : `local-${r.protocol}-${r.port}`
+              }
+            >
               <div className="rule-card-header">
                 <span className={`protocol-badge ${r.protocol}`}>
                   {r.protocol === 'both' ? 'TCP/UDP' : r.protocol.toUpperCase()}
                 </span>
                 <span className="port-number">:{r.port}</span>
+                <span className="rule-label">
+                  {r.rule_type === 'forward' ? '端口转发' : '本机开放'}
+                </span>
               </div>
               <div className="rule-card-body">
                 <div className="rule-row rule-comment-row">
@@ -294,7 +394,11 @@ export default function NftablesPage() {
                 </div>
                 <div className="rule-row">
                   <span className="rule-label">目标</span>
-                  <span className="rule-value">{r.dest_ip}:{r.dest_port}</span>
+                  <span className="rule-value">
+                    {r.rule_type === 'forward'
+                      ? `${r.dest_ip}:${r.dest_port}`
+                      : '本机监听服务'}
+                  </span>
                 </div>
                 <div className="rule-row">
                   <span className="rule-label">白名单</span>

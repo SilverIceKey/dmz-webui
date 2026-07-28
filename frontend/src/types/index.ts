@@ -9,6 +9,15 @@ export interface NfRule {
   whitelist_ips?: string;
 }
 
+export interface LocalPortRule {
+  id: number;
+  port: number;
+  protocol: string;
+  comment?: string;
+  whitelist_type: string;
+  whitelist_ips?: string;
+}
+
 export interface ServiceStatus {
   name: string;
   active: boolean;

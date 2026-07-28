@@ -48,6 +48,12 @@ export const nftables = {
     api.put(`/nftables/rules/${protocol}/${port}`, data, { params: { old_dest_ip, old_dest_port } }),
   remove: (protocol: string, port: number, dest_ip: string, dest_port: number) =>
     api.delete(`/nftables/rules/${protocol}/${port}`, { params: { dest_ip, dest_port } }),
+  listOpenPorts: () => api.get('/nftables/open-ports'),
+  createOpenPort: (data: any) => api.post('/nftables/open-ports', data),
+  editOpenPort: (protocol: string, port: number, data: any) =>
+    api.put(`/nftables/open-ports/${protocol}/${port}`, data),
+  removeOpenPort: (protocol: string, port: number) =>
+    api.delete(`/nftables/open-ports/${protocol}/${port}`),
   updateCnIpset: () => api.post('/nftables/update-cn-ipset'),
 };
 

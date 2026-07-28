@@ -79,6 +79,84 @@ class ExtractOwnedTablesTests(unittest.TestCase):
         self.assertIn("chain prerouting", updated)
         self.assertEqual(updated.count("set cn_ipv4"), 1)
 
+    def test_upsert_named_block_is_scoped_to_parent_table(self):
+        config = VALID_CONFIG.replace(
+            "    chain input {",
+            "    set cn_ipv4 {\n"
+            "        type ipv4_addr\n"
+            "        flags interval\n"
+            "    }\n\n"
+            "    chain input {",
+        )
+        replacement = """    set cn_ipv4 {
+        type ipv4_addr
+        flags interval
+        elements = { 192.0.2.0/24 }
+    }"""
+
+        updated = firewall.upsert_named_block_in_parent(
+            config,
+            "table inet dmz_webui_filter",
+            "set cn_ipv4",
+            replacement,
+            "chain input",
+        )
+
+        filter_table = firewall.extract_named_block(
+            updated, "table inet dmz_webui_filter"
+        )
+        nat_table = firewall.extract_named_block(
+            updated, "table ip dmz_webui_nat"
+        )
+        self.assertIn("elements = { 192.0.2.0/24 }", filter_table)
+        self.assertIn("elements = { 10.0.0.0/8 }", nat_table)
+
+    def test_normalizes_comment_attached_chain_closing_brace(self):
+        malformed = VALID_CONFIG.replace(
+            "policy accept\n    }\n}",
+            "policy accept\n"
+            "        tcp dport 19262 dnat to 127.0.0.1:19262 # Portainer}\n"
+            "}",
+        )
+
+        normalized = firewall.normalize_named_block_closing_brace(
+            malformed, "chain prerouting"
+        )
+
+        self.assertIn("# Portainer\n    }\n}", normalized)
+        self.assertNotIn("# Portainer}", normalized)
+        self.assertIsNotNone(
+            firewall.extract_named_block(normalized, "chain prerouting")
+        )
+
+    def test_does_not_treat_a_brace_inside_a_valid_comment_as_chain_close(self):
+        valid_with_brace_comment = VALID_CONFIG.replace(
+            "policy accept\n    }\n}",
+            "policy accept\n"
+            "        tcp dport 19262 dnat to 127.0.0.1:19262 # label }\n"
+            "    }\n"
+            "}",
+        )
+
+        normalized = firewall.normalize_named_block_closing_brace(
+            valid_with_brace_comment, "chain prerouting"
+        )
+
+        self.assertEqual(normalized, valid_with_brace_comment)
+
+    def test_inserts_rule_before_closing_brace_on_its_own_line(self):
+        line = (
+            "        ip saddr @cn_ipv4 tcp dport 19262 "
+            "dnat to 127.0.0.1:19262 # Portainer"
+        )
+
+        updated = firewall.insert_lines_before_named_block_close(
+            VALID_CONFIG, "chain prerouting", [line]
+        )
+
+        self.assertIn(f"{line}\n    }}", updated)
+        self.assertNotIn(f"{line}}}", updated)
+
 
 class OwnedApplyBatchTests(unittest.TestCase):
     @patch("firewall._nft_object_exists", side_effect=[True, False])
@@ -173,6 +251,7 @@ class RepositoryConfigTests(unittest.TestCase):
         self.assertNotIn("flush ruleset", config)
         extracted = firewall.extract_owned_tables(config)
         self.assertEqual(extracted.count("table "), 2)
+        self.assertEqual(extracted.count("set cn_ipv4"), 2)
 
 
 if __name__ == "__main__":
